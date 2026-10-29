@@ -1,10 +1,11 @@
 # Portal 2 AVP — immersive visionOS port in development
 
 This fork starts from [kanapitsas/portal2-recomp](https://github.com/kanapitsas/portal2-recomp).
-**Portal 2 does not run on visionOS yet.** The first native platform work is
-a CompositorServices stereo renderer check, a tracked-pose/input boundary,
-and tested coordinate/recenter/portal-transform math. The game renderer and
-Linux stereo hooks still need to be connected. No Vision Pro gameplay,
+**No playable immersive visionOS build is verified yet.** Development includes
+a CompositorServices renderer check, a Metal-backed offscreen GL host, a native
+engine-test window, DualSense/Sense input adapters and tested pose/portal math.
+The actual engine, stereo hooks and physical controls still need acceptance.
+No Vision Pro gameplay,
 multiplayer, Workshop, or campaign-completion claim is made for this fork.
 
 - [visionOS status, research, implementation path](docs/visionos.md)
@@ -12,7 +13,9 @@ multiplayer, Workshop, or campaign-completion claim is made for this fork.
 - Prerequisite report: `python3 tools/visionos.py --preflight`
 - Native XR tests: `python3 -m unittest discover -s tests -p test_visionos_xr.py -v`
 
-The renderer check is a diagnostic with a grid and boxes, contains no game
+The goal is immersive stereoscopic 6DoF on Vision Pro with DualSense and tracked
+PSVR2 Sense, plus windowed visionOS and iPad/iPhone. The renderer check is a
+diagnostic with a grid and boxes, contains no game
 code or retail assets, and is named separately from the eventual game app.
 The upstream Mac/iPhone documentation below describes **upstream support**.
 

@@ -54,7 +54,13 @@ static void *handle(CPU *c, uint32_t value, uint32_t kind, const char *what) {
 #define WINDOW(i) ((SDL_Window *)handle(c, arg(c, i), RT_SDL_WINDOW, "SDL: invalid SDL_Window handle"))
 
 static void require_main_thread(CPU *c, const char *what) {
+#if TARGET_OS_VISION
+    // visionOS uses SDL's dummy video objects on the guest worker. SwiftUI
+    // and CompositorServices own all native windows on their own threads.
+    (void)c; (void)what;
+#else
     if (!pthread_main_np()) rt_trap(c, c->eip, what);
+#endif
 }
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;

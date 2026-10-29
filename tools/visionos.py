@@ -45,9 +45,9 @@ def inspect(config_path=None):
     check('linux_depot_661', not missing, str(linux) + ('; missing: ' + ', '.join(missing) if missing else ''))
     # These are implementation blockers, not something an input file can fix.
     check('visionos_game_renderer', False,
-          'Pending: replace EAGL/OpenGLES with a visionOS Metal-backed GL path and feed both engine views to CompositorServices.')
+          'Metal-backed offscreen GL host and engine-test window implemented; pending actual engine execution, paired eye rendering and CompositorServices game submission.')
     check('linux_stereo_hooks', False,
-          'Pending: identify and verify CViewRender/CViewSetup and player-portal hooks against the owned Linux binaries. Windows offsets cannot be reused.')
+          'Owned-client hash/RTTI audit identifies RenderView; pass-through runtime CViewSetup audit, stereo and player-portal hooks still require execution validation.')
     return dict(game_ready=all(item['ready'] for item in checks),
                 renderer_check_ready=all(item['ready'] for item in checks[:3]),
                 upstream='kanapitsas/portal2-recomp', checks=checks)

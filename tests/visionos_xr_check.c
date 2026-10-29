@@ -108,6 +108,65 @@ static void session_and_input(void) {
     assert(!p2_xr_read(current, &read, &out));
     assert(!out.connected && !read.tracked);
 }
+static void spatial_controller_tracking(void) {
+    uint64_t session = p2_xr_begin_session();
+    P2XRFrame f = frame(), snapshot;
+    P2XRInput input = {.connected=1,.spatial=1,.orange_trigger=1,.buttons=P2_XR_USE}, read;
+    f.controllers[1].tracked = 1;
+    f.controllers[1].tracking_from_aim = matrix_identity_float4x4;
+    f.controllers[1].tracking_from_aim.columns[3] = (vector_float4){2.2f,1.3f,2.6f,1};
+    f.controllers[1].tracking_from_grip = f.controllers[1].tracking_from_aim;
+    assert(p2_xr_publish_frame(session,&f));
+    assert(p2_xr_publish_input(session,&input));
+    assert(p2_xr_read_latest(&snapshot,&read) == session);
+    assert(read.orange_trigger == 1 && read.buttons == P2_XR_USE);
+    matrix_float4x4 alignment;
+    assert(p2_xr_align(&snapshot,(vector_float3){100,200,64},0,P2_XR_UNITS_PER_METER,&alignment));
+    P2XRSourceView aim;
+    assert(p2_xr_source_controller(&snapshot,1,alignment,&aim));
+    near(aim.origin.x,100 + 0.4f * P2_XR_UNITS_PER_METER);
+    near(aim.origin.y,200 - 0.2f * P2_XR_UNITS_PER_METER);
+    near(aim.origin.z,64 - 0.3f * P2_XR_UNITS_PER_METER);
+    assert(!p2_xr_source_controller(&snapshot,0,alignment,&aim));
+    matrix_float4x4 portal = {{{0,1,0,0}, {-1,0,0,0}, {0,0,1,0}, {10,20,30,1}}};
+    assert(p2_xr_cross_portal(portal,&alignment));
+    assert(p2_xr_source_controller(&snapshot,1,alignment,&aim));
+    near(aim.angles.y,90);
+    // Losing position tracking while holding fire/grab immediately releases
+    // actions, even if GameController sends no new button event.
+    f.sequence = 2; f.presentation_time = 2; f.controllers[1].tracked = 0;
+    assert(p2_xr_publish_frame(session,&f));
+    assert(p2_xr_read_latest(&snapshot,&read) == session);
+    assert(!read.connected && !read.buttons && !read.orange_trigger);
+    p2_xr_publish_input(session,&input);
+    p2_xr_read_latest(&snapshot,&read); assert(!read.connected);
+    input.spatial = 0; // ordinary DualSense needs no spatial accessory pose
+    p2_xr_publish_input(session,&input);
+    p2_xr_read_latest(&snapshot,&read); assert(read.orange_trigger == 1);
+    f.sequence = 3; f.presentation_time = 3; f.controllers[1].tracked = 1;
+    f.controllers[1].tracking_from_aim.columns[0].x = NAN;
+    assert(!p2_xr_publish_frame(session,&f));
+    assert(!p2_xr_read_latest(&snapshot,&read));
+    assert(!read.connected && !read.buttons);
+    p2_xr_end_session(session);
+}
+static void window_controls(void) {
+    uint64_t window = p2_xr_begin_window_session();
+    P2XRInput in = {.connected=1,.spatial=1,.blue_trigger=1,.buttons=P2_XR_JUMP}, out;
+    assert(p2_xr_publish_input(window,&in));
+    assert(p2_xr_read_controls(&out) == window && out.blue_trigger == 1);
+    P2XRFrame fake = frame(), read;
+    assert(!p2_xr_publish_frame(window,&fake)); // window mode invents no head pose
+    assert(!p2_xr_read_latest(&read,NULL) && !read.tracked);
+    uint64_t immersive = p2_xr_begin_session();
+    assert(!p2_xr_read_controls(&out) && !out.connected);
+    assert(!p2_xr_publish_input(window,&in));
+    assert(p2_xr_publish_input(immersive,&in));
+    assert(!p2_xr_read_controls(&out) && !out.blue_trigger);
+    assert(p2_xr_publish_frame(immersive,&fake));
+    p2_xr_read_controls(&out); assert(!out.connected);
+    p2_xr_end_session(immersive);
+}
 static void *reader(void *arg) {
     uint64_t session = *(uint64_t *)arg;
     for (int i = 0; i < 10000; ++i) {
@@ -133,7 +192,7 @@ static void concurrent_publication(void) {
     p2_xr_end_session(session);
 }
 int main(void) {
-    views_and_portals(); session_and_input(); concurrent_publication();
+    views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication");
     return 0;
 }

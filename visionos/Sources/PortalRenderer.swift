@@ -34,6 +34,7 @@ final class PortalRenderer: @unchecked Sendable {
     private var trackingTask: Task<Void, Never>?
     private var originFromScene: simd_float4x4?
     private var firstFrame = true
+    private var spatial: (any PortalSpatialSource)?
 
     private struct Vertex {
         var position: SIMD3<Float>
@@ -41,12 +42,18 @@ final class PortalRenderer: @unchecked Sendable {
     }
 
     static func start(layer: LayerRenderer) {
+        guard p2_xr_abi_version() == P2_XR_ABI_VERSION else {
+            NSLog("[P2XR] Refusing mismatched native XR archive")
+            NotificationCenter.default.post(name: .portalRendererStopped, object: nil)
+            return
+        }
         do {
             let renderer = try PortalRenderer(layer: layer)
             renderer.trackingTask = Task {
                 do {
                     if WorldTrackingProvider.isSupported {
                         try await renderer.arSession.run([renderer.tracking])
+                        await renderer.spatial?.start()
                     }
                 } catch { NSLog("[P2XR] World tracking failed: %@", String(describing: error)) }
             }
@@ -86,12 +93,15 @@ final class PortalRenderer: @unchecked Sendable {
         }) else { throw NSError(domain: "Portal2XR", code: 3) }
         vertices = buffer
         session = p2_xr_begin_session()
+        if #available(visionOS 26.0, *) {
+            spatial = PortalSenseTracking(session: arSession, world: tracking)
+        }
     }
 
     private func run() {
         let session = self.session
         DispatchQueue.main.async {
-            PortalController.attach(session: session)
+            PortalController.attach(session: session, spatial: self.spatial)
         }
         defer {
             p2_xr_end_session(session)
@@ -99,6 +109,7 @@ final class PortalRenderer: @unchecked Sendable {
             arSession.stop()
             DispatchQueue.main.async {
                 PortalController.stop(session: session)
+                self.spatial?.stop()
                 NotificationCenter.default.post(name: .portalRendererStopped, object: nil)
             }
             NSLog("[P2XR] Session %llu stopped", session)
@@ -153,7 +164,9 @@ final class PortalRenderer: @unchecked Sendable {
         let tracked = anchor?.isTracked == true
         let head = anchor?.originFromAnchorTransform ?? matrix_identity_float4x4
         #endif
+        #if !targetEnvironment(simulator)
         if tracked { drawable.deviceAnchor = anchor }
+        #endif
         sequence += 1
         var xr = P2XRFrame()
         xr.sequence = sequence
@@ -161,6 +174,7 @@ final class PortalRenderer: @unchecked Sendable {
         xr.tracked = tracked ? 1 : 0
         xr.eye_count = UInt32(drawable.views.count)
         xr.tracking_from_head = head
+        spatial?.writePoses(at: timestamp, into: &xr)
         if drawable.views.count == 2 {
             xr.eyes.0.head_from_eye = drawable.views[0].transform
             xr.eyes.1.head_from_eye = drawable.views[1].transform

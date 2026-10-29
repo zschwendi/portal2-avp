@@ -19,8 +19,8 @@ Relevant primary sources:
 | [portal2-recomp](https://github.com/kanapitsas/portal2-recomp) | Existing Linux i386 → ARM64 lifter/runtime and Mac/iPhone game path | iPhone renderer depends on EAGL/OpenGLES; iPhone Steam is an offline stub |
 | [Portal2VR](https://github.com/Gistix/portal2vr) | Reference for paired RenderView calls, separate eye targets, portal camera correction, controller aiming and UI handling | Windows x86 D3D9/OpenVR hooks and signatures cannot run on visionOS or be copied to Linux offsets |
 | [SourceVR](https://github.com/tinsarfal/SourceVR) | Standalone Quest/PICO installation/mod and gameplay reference | Public repo currently publishes documentation/releases rather than engine source; Portal 2 is explicitly highly experimental, not campaign-ready |
-| [SDL2 compatibility on SDL3](https://github.com/libsdl-org/sdl2-compat) | Candidate for retaining the guest SDL2 ABI on a visionOS SDL3 host | Requires build/runtime validation; not integrated here |
-| [ANGLE](https://github.com/google/angle/blob/main/doc/DevSetup.md) | GLES → Metal candidate below the upstream gl4es layer | visionOS builds/interoperability must be verified; an iOS binary is not a visionOS dependency |
+| [SDL2](https://github.com/libsdl-org/SDL/tree/release-2.32.10) | Guest ABI, dummy window bookkeeping and virtual gamepad | SwiftUI owns native windows; HIDAPI is disabled on visionOS |
+| [ANGLE](https://github.com/google/angle/blob/main/doc/DevSetup.md) | GLES → Metal below the upstream gl4es layer | Current binaries are retargeted iOS builds; simulator execution passes, physical acceptance pending |
 | [Apple compositor rendering](https://developer.apple.com/videos/play/wwdc2025/294/) | Native per-eye views, projection and drawable presentation | Needs actual game draw targets and tracking on the headset |
 
 Portal2VR source inspected at `310ac494e26cfac17b86e681e48147532682efca`,
@@ -48,26 +48,58 @@ accepts an explicit scale so physical calibration can change it.
   data. The simulator may use a fixed diagnostic pose; it never publishes
   that pose to the game bridge as tracked.
 - GameController snapshots: left stick movement, right stick turn,
-  left/right triggers blue/orange, A jump, B crouch, X use, Menu pause,
+  right/left triggers blue/orange, A jump, B crouch, X use, Menu pause,
   left stick click recenter. These actions are captured at the boundary;
-  **the game does not consume them yet**.
+  an SDL virtual gamepad now exposes them to the guest's existing input ABI.
+  A synthetic route test verifies axes, trigger polarity and disconnect;
+  **physical game controls remain unverified**.
 - `tools/visionos.py`: reports both missing data and missing implementation;
   builds the named renderer check. It does not substitute that check for a
   Portal 2 build or install anything on the headset.
 
+## Native host checkpoint
+
+The owner is signed into Steam; retail content and supported Linux depot
+manifest `8940703274703023246` are installed locally. The Mac baseline compiled
+and its real menu was observed. The owner reported stutter/hang; this is not
+accepted gameplay and the Mac test has been stopped. Vision Pro is the target.
+
+- `tools/mobile_deps.py` builds pinned SDL2, FreeType, gl4es and visionOS OpenAL
+  dependencies, preserving notices and writing local receipts. Both simulator
+  dependency prefixes have been built. See `visionos/deps/README.md`.
+- `runtime/visionos/gl_vision.m` provides ANGLE Metal GLES contexts with a
+  leased IOSurface pool, GPU synchronization and safe surface resizing. The
+  fork's existing iOS shader/sRGB fixes remain above that backend. The native
+  simulator GPU probe verifies pixels before/after resize and physical row
+  orientation; no game data is involved in that probe.
+- `PortalGameView` is a native Metal window for real engine frames. The full
+  visionOS and iOS simulator game compiles are in progress at this checkpoint;
+  **no real visionOS engine frame has been observed yet**.
+- `tools/visionos_hooks.py` verifies the owned client SHA-256 and derives its
+  `CViewRender` table from RTTI. `view_vision.c` optionally installs a
+  pass-through `RenderView` audit with loaded-byte and camera-layout checks.
+  Its layout has not been runtime-validated. No Windows hook offsets are used.
+- PSVR2 Sense uses fixed hardware chirality, two independent GameController
+  profiles and ARKit-predicted aim/grip poses at the headset presentation time.
+  Duplicate hand identities and orientation-only tracking are rejected.
+  Tracking loss releases held controls. This code builds against the SDK;
+  **controller poses, aiming and gameplay have not been accepted on hardware**.
+- Window input sessions do not invent a head pose or require accessory motion
+  permission. The immersive session requires tracked headset/eye data. Session
+  retirement prevents an old window or render thread from publishing controls.
+
+Current Python/native suite: 47 tests pass, including UBSan XR math/session
+checks. Native runtime audit: 58 source units compile with warnings treated as
+errors. The offscreen GPU/SDL input probe passes. These are component checks,
+not campaign, stereo, device or performance acceptance.
+
 ## Work needed for a playable build
 
-1. Obtain the owner's retail content and Linux depot 661 through Steam;
-   verify the supported manifest `8940703274703023246` or audit any changed
-   binaries. Write only local ignored `config/local.json`. First reproduce
-   the actual upstream game on Mac to distinguish pre-existing failures.
-2. Build a visionOS host graphics path. Current pipeline is
-   `togl → runtime/gl.c → gl4es → EAGL/OpenGLES`; both EAGL and OpenGLES must
-   be replaced on visionOS. Candidate: keep gl4es/shader corrections over
-   ANGLE's Metal backend, render into shareable offscreen eye targets, then
-   submit them with their matching native projection/depth convention.
-   OpenAL also needs a visionOS implementation, and SDL2 needs a supported
-   host backend. Do not simply change the iOS target triple.
+1. Finish and exercise the full visionOS engine build against the owned
+   content. Diagnose startup, rendering, audio, input and sustained timing.
+2. Extend the working offscreen host from a single game surface to paired
+   engine eye targets and submit them with matching poses/projections and
+   correct depth conventions to CompositorServices.
 3. Resolve engine RenderView/CViewSetup and player-portal hooks against the
    **owned Linux binary** with symbol/byte/layout checks. Preserve the
    original single-view code as fallback. Update simulation once, render
@@ -90,7 +122,9 @@ accepts an explicit scale so physical calibration can change it.
 
 | Feature | Current evidence / next gate |
 | --- | --- |
-| Native fully immersive gameplay | Not implemented; only the separate renderer check builds |
+| Native fully immersive gameplay | Not implemented; native host/probe builds, full engine integration and stereo acceptance pending |
+| Windowed visionOS; iPhone/iPad | Engine-test window and upstream iOS path build work in progress; actual gameplay acceptance pending |
+| DualSense / PSVR2 Sense | Native input/pose adapters and synthetic SDL route pass; hardware controls and game aiming unverified |
 | Original campaign/physics/saves | Aim to retain original recompiled code and content; visionOS behavior untested |
 | Content mods/custom maps | Preserve the retail filesystem and archives; actual mounting and playthrough untested |
 | Workshop subscriptions/downloads | Not available through upstream iOS Steam stubs; manual owned content is the first candidate |
@@ -116,7 +150,7 @@ accepts an explicit scale so physical calibration can change it.
   `visionos/{sim,device}/receipt.json`, `visionos-simulator-xr.log`,
   and `visionos-renderer-immersive.png`.
 - Steam installed from Valve's official Mac installer and updated locally;
-  entitlement, retail files and depot 661 still require the owner's sign-in.
+  owner subsequently signed in and both retail content and depot 661 completed.
 
 Generated C, game binaries, depots, VPKs and signed game apps stay local.
 Retain upstream GPLv3 and attribution; use only the owner's original game data.

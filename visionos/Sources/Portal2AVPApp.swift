@@ -4,6 +4,9 @@ import CompositorServices
 @main
 struct Portal2AVPApp: App {
     var body: some Scene {
+        #if P2_GAME
+        WindowGroup { PortalGameView() }.defaultSize(width: 1000, height: 680)
+        #else
         WindowGroup(id: "setup") {
             RendererCheckView()
         }.defaultSize(width: 540, height: 460)
@@ -12,6 +15,7 @@ struct Portal2AVPApp: App {
                 PortalRenderer.start(layer: layer)
             }
         }.immersionStyle(selection: .constant(.full), in: .full)
+        #endif
     }
 }
 

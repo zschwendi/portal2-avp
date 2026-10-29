@@ -8,10 +8,14 @@ final class PortalController {
     private let session: UInt64
     private var observers: [NSObjectProtocol] = []
     private var controller: GCController?
+    private let spatial: (any PortalSpatialSource)?
+    private var timer: Timer?
+    private var suspended = false
     private static var active: PortalController?
 
-    init(session: UInt64) {
+    init(session: UInt64, spatial: (any PortalSpatialSource)?) {
         self.session = session
+        self.spatial = spatial
         Self.active?.stop()
         Self.active = self
         let center = NotificationCenter.default
@@ -22,37 +26,59 @@ final class PortalController {
             Task { @MainActor [weak self] in self?.selectController() }
         })
         selectController()
+        // Poll complete state, including held buttons after tracking resumes.
+        // Avoid taking ownership of handlers used by SDL's MFi driver.
+        let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.publish() }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func selectController() {
-        controller?.extendedGamepad?.valueChangedHandler = nil
         p2_xr_release_input(session)
-        controller = GCController.controllers().first { $0.extendedGamepad != nil }
-        let session = self.session
-        controller?.extendedGamepad?.valueChangedHandler = { pad, _ in
+        controller = GCController.controllers().first {
+            if #available(visionOS 26.0, *), $0.productCategory == GCProductCategorySpatialController { return false }
+            return $0.extendedGamepad != nil
+        }
+        publish()
+    }
+
+    private func publish() {
+        guard p2_xr_session_active(session) != 0 else { return }
+        guard !suspended else { p2_xr_release_input(session); return }
+        if var input = spatial?.inputSnapshot() {
+            p2_xr_publish_input(session, &input)
+        } else if let pad = controller?.extendedGamepad {
             var input = P2XRInput()
             input.connected = 1
             input.move_x = pad.leftThumbstick.xAxis.value
             input.move_y = pad.leftThumbstick.yAxis.value
             input.turn_x = pad.rightThumbstick.xAxis.value
-            input.blue_trigger = pad.leftTrigger.value
-            input.orange_trigger = pad.rightTrigger.value
+            input.blue_trigger = pad.rightTrigger.value
+            input.orange_trigger = pad.leftTrigger.value
             if pad.buttonA.isPressed { input.buttons |= UInt32(P2_XR_JUMP.rawValue) }
             if pad.buttonB.isPressed { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
             if pad.buttonX.isPressed { input.buttons |= UInt32(P2_XR_USE.rawValue) }
             if pad.buttonMenu.isPressed { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
             if pad.leftThumbstickButton?.isPressed == true { input.buttons |= UInt32(P2_XR_RECENTER.rawValue) }
             p2_xr_publish_input(session, &input)
-        }
+        } else { p2_xr_release_input(session) }
     }
 
     static func releaseAll() {
         if let active { p2_xr_release_input(active.session) }
     }
 
-    static func attach(session: UInt64) {
+    static func suspend(session: UInt64, _ value: Bool) {
+        guard let active, active.session == session else { return }
+        active.suspended = value
+        active.publish()
+    }
+
+    static func attach(session: UInt64, spatial: (any PortalSpatialSource)?) {
         guard p2_xr_session_active(session) != 0 else { return }
-        _ = PortalController(session: session)
+        _ = PortalController(session: session, spatial: spatial)
     }
 
     static func stop(session: UInt64) {
@@ -60,7 +86,8 @@ final class PortalController {
     }
 
     func stop() {
-        controller?.extendedGamepad?.valueChangedHandler = nil
+        timer?.invalidate()
+        timer = nil
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         p2_xr_release_input(session)

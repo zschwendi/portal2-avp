@@ -2,6 +2,6 @@ build/
 *.o
 __pycache__/
 config/local.json
-deps/
+/deps/
 visionos/*.xcodeproj/
 visionos/*.xcworkspace/

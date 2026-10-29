@@ -1,0 +1,18 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -494,7 +494,7 @@
+ set_option(SDL_HIDAPI              "Enable the HIDAPI subsystem" ON)
+ dep_option(SDL_HIDAPI_LIBUSB       "Use libusb for low level joystick drivers" OFF SDL_HIDAPI OFF)
+ dep_option(SDL_HIDAPI_JOYSTICK     "Use HIDAPI for low level joystick drivers" ON SDL_HIDAPI OFF)
+-dep_option(SDL_VIRTUAL_JOYSTICK    "Enable the virtual-joystick driver" ON SDL_HIDAPI OFF)
++dep_option(SDL_VIRTUAL_JOYSTICK    "Enable the virtual-joystick driver" ON SDL_JOYSTICK OFF)
+ set_option(SDL_LIBUDEV             "Enable libudev support" ON)
+ set_option(SDL_ASAN                "Use AddressSanitizer to detect memory errors" OFF)
+ option_string(SDL_VENDOR_INFO      "Vendor name and/or version to add to SDL_REVISION" "")
+@@ -2241,5 +2241,5 @@
+   # iOS hack needed - http://code.google.com/p/ios-cmake/ ?
+-  if(SDL_VIDEO)
++  if(SDL_VIDEO AND NOT P2_SDL_DUMMY_ONLY)
+     if(IOS OR TVOS OR VISIONOS OR WATCHOS)
+       set(SDL_VIDEO_DRIVER_UIKIT 1)
+       set(SDL_FRAMEWORK_COREGRAPHICS 1)

@@ -13,7 +13,9 @@
 #include "sdl_common.h"
 #include <SDL2/SDL.h>
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_VISION
+#include "visionos/sdl_vision.h"
+#elif TARGET_OS_IPHONE
 #include "ios/sdl_ios.h"   // coordonnées en pixels pour le jeu
 #endif
 #include <stddef.h>

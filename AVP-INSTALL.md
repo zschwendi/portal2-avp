@@ -61,7 +61,7 @@ The tool does not install or launch on a device. Its receipt states whether
 the build was signed. The renderer-check identifier is separate from the
 eventual game identifier and will not replace existing game apps/saves.
 
-## Game files for later integration
+## Owned game files
 
 The base recomp needs a complete owned Portal 2 content folder and the Linux
 depot 661. The [upstream README](README.md#upstream-portal-2-statically-recompiled-for-apple-silicon-macos-and-iphone)
@@ -70,6 +70,41 @@ requires an entitled signed-in account. Installing Steam on a modern Mac
 does not make the original 32-bit Mac game executable compatible; only the
 retail content and supported Linux binaries are required for recompilation.
 Do not obtain them from third-party repacks.
+
+## Native engine test (development)
+
+This second app hosts the actual recompiled engine in a window. It is still
+being validated and is **not an immersive stereo game release**. Keep an owned
+retail content folder and the supported Linux manifest in ignored
+`config/local.json`, then:
+
+```sh
+python3 tools/mobile_deps.py --platform visionos --target sim --jobs 3
+python3 tools/gameprep.py
+python3 tools/build_visionos_game.py --target sim --jobs 3
+xcodegen generate --spec visionos/project.yml
+xcodebuild -project visionos/Portal2AVP.xcodeproj -scheme Portal2Game -sdk xrsimulator -destination 'generic/platform=visionOS Simulator' -derivedDataPath build/visionos/GameApp CODE_SIGNING_ALLOWED=NO build
+python3 tools/run_visionos_game.py --sim VISION_PRO_SIMULATOR_UDID --audit-render-view
+```
+
+The launch helper links content/prepared images into this app's Documents,
+preserves different existing paths and keeps saves in its separate user folder.
+It restarts only the development engine-test identifier. Simulator audio is
+muted unless `--audio` is passed. See its printed path for `Documents/game.log`.
+The optional RenderView hook is a hash-checked, pass-through layout audit; it
+does not change the camera or enable stereo.
+
+For the fork's iPhone/iPad path:
+
+```sh
+python3 tools/mobile_deps.py --platform ios --target sim --jobs 3
+python3 tools/build_ios.py --target sim --deps deps/ios/sim --opt 1 --fast-memory --jobs 3
+```
+
+This compiles the same generated game C for iOS using the existing UIKit/EAGL
+host and touch controls. Installation, physical input and gameplay acceptance
+remain separate. Keep device data/saves intact when following upstream device
+instructions. All generated C/apps/assets remain local.
 
 See [docs/visionos.md](docs/visionos.md) for the remaining game-renderer,
 input, mod, and multiplayer work.

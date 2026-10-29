@@ -12,8 +12,14 @@
 // guest takes its fallback path instead of jumping to an unbridged function.
 // All entry points are cdecl on Linux i386; ALCboolean is returned in AL.
 #include "rt.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_VISION
+#include <AL/al.h>
+#include <AL/alc.h>
+#else
 #include <OpenAL/al.h>
 #include <OpenAL/alc.h>
+#endif
 #include <stdlib.h>
 
 #define KIND_DEVICE 0x414c4344u   // 'ALCD'

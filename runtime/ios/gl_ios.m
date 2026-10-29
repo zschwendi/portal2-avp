@@ -2,10 +2,15 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #define GLES_SILENCE_DEPRECATION 1
+#if TARGET_OS_VISION
+#include <GLES3/gl3.h>
+#include "../visionos/gl_vision.h"
+#else
 #import <OpenGLES/EAGL.h>
 #import <UIKit/UIKit.h>
-#include <math.h>
 #include <OpenGLES/ES3/gl.h>
+#endif
+#include <math.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <dlfcn.h>
@@ -19,7 +24,9 @@ void gl4es_post_swap(void);
 
 static void *gles;
 static GLuint system_framebuffer;   // FBO de la vue SDL : le « 0 » d'iOS
+#if !TARGET_OS_VISION
 static GLuint system_colorbuffer;   // son renderbuffer couleur, présenté par SDL
+#endif
 static int drawable_width, drawable_height;
 static void (*real_bind_framebuffer)(GLenum, GLuint);
 static void (*real_get_integerv)(GLenum, GLint *);
@@ -243,12 +250,22 @@ static void *gles_function(const char *name) {
     if (!strcmp(name, "glGetIntegerv")) return (void *)get_integerv;
     return dlsym(gles, name);
 }
-static void main_framebuffer_size(int *width, int *height) { *width = drawable_width; *height = drawable_height; }
+static void main_framebuffer_size(int *width, int *height) {
+#if TARGET_OS_VISION
+    p2_vision_gl_drawable_size(width,height);
+#else
+    *width = drawable_width; *height = drawable_height;
+#endif
+}
 
 static void load_extras(void);
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static void start_gl4es(void) {
+#if TARGET_OS_VISION
+    gles = p2_vision_gles_library();
+#else
     gles = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_LOCAL);
+#endif
     real_bind_framebuffer = dlsym(gles, "glBindFramebuffer");
     real_get_integerv = dlsym(gles, "glGetIntegerv");
     real_get_string = dlsym(gles, "glGetString");
@@ -751,6 +768,7 @@ void *rt_host_gl_symbol(void *library, const char *name) {
     return gl4es_get_string ? rt_ios_srgb_wrap(name, gl4es_GetProcAddress(name)) : gl4es_GetProcAddress(name);
 }
 
+#if !TARGET_OS_VISION
 void *rt_ios_gl_current_context(void) { return (__bridge void *)[EAGLContext currentContext]; }
 void *rt_ios_gl_share_group(void *context) {
     return context ? (__bridge void *)((__bridge EAGLContext *)context).sharegroup : NULL;
@@ -880,4 +898,28 @@ void rt_ios_gl_swap_window(SDL_Window *window) {
     bind_rb(GL_RENDERBUFFER, (GLuint)renderbuffer);
     gl4es_post_swap();
 }
+#else
+void *rt_ios_gl_current_context(void) { return p2_vision_gl_current_context(); }
+void *rt_ios_gl_share_group(void *context) { return p2_vision_gl_share_group(context); }
+SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
+    SDL_GetWindowSize(window, &drawable_width, &drawable_height);
+    SDL_GLContext context = p2_vision_gl_create_context(drawable_width, drawable_height);
+    if (!context) return NULL;
+    // ANGLE's IOSurface pbuffer has a real default FBO; unlike EAGL it is 0.
+    system_framebuffer = 0;
+    pthread_once(&once, start_gl4es);
+    fprintf(stderr, "[gl-vision] gl4es over ANGLE Metal, %dx%d\n", drawable_width, drawable_height);
+    return context;
+}
+void rt_ios_draws_frame_end(void);
+unsigned long rt_ios_frames;
+void rt_ios_gl_swap_window(SDL_Window *window) {
+    (void)window;
+    ++rt_ios_frames;
+    rt_ios_draws_frame_end();
+    gl4es_pre_swap();
+    p2_vision_gl_present();
+    gl4es_post_swap();
+}
+#endif
 #endif

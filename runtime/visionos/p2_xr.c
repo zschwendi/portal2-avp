@@ -9,6 +9,8 @@ static uint64_t last_sequence;
 static double last_presentation_time;
 static P2XRFrame latest_frame;
 static P2XRInput latest_input;
+static int window_session;
+uint32_t p2_xr_abi_version(void) { return P2_XR_ABI_VERSION; }
 
 static int finite_matrix(matrix_float4x4 m) {
     for (int c = 0; c < 4; ++c)
@@ -37,11 +39,16 @@ static int valid_frame(const P2XRFrame *f) {
     for (unsigned e = 0; e < P2_XR_EYE_COUNT; ++e)
         if (!valid_pose(f->eyes[e].head_from_eye) || !finite_matrix(f->eyes[e].projection) ||
             fabsf(simd_determinant(f->eyes[e].projection)) < 1e-8f) return 0;
+    for (unsigned hand = 0; hand < 2; ++hand)
+        if (f->controllers[hand].tracked &&
+            (!valid_pose(f->controllers[hand].tracking_from_aim) ||
+             !valid_pose(f->controllers[hand].tracking_from_grip))) return 0;
     return 1;
 }
-uint64_t p2_xr_begin_session(void) {
+static uint64_t begin_session(int windowed) {
     pthread_mutex_lock(&state_lock);
     active_session = ++next_session;
+    window_session = windowed;
     last_sequence = 0;
     last_presentation_time = 0;
     memset(&latest_frame, 0, sizeof(latest_frame));
@@ -50,6 +57,8 @@ uint64_t p2_xr_begin_session(void) {
     pthread_mutex_unlock(&state_lock);
     return session;
 }
+uint64_t p2_xr_begin_session(void) { return begin_session(0); }
+uint64_t p2_xr_begin_window_session(void) { return begin_session(1); }
 int p2_xr_session_active(uint64_t session) {
     pthread_mutex_lock(&state_lock);
     int active = session && session == active_session;
@@ -67,7 +76,7 @@ void p2_xr_end_session(uint64_t session) {
 }
 int p2_xr_publish_frame(uint64_t session, const P2XRFrame *frame) {
     pthread_mutex_lock(&state_lock);
-    int accepted = session && session == active_session;
+    int accepted = session && session == active_session && !window_session;
     if (accepted) {
         if (!valid_frame(frame)) {
             memset(&latest_frame, 0, sizeof(latest_frame));
@@ -77,6 +86,8 @@ int p2_xr_publish_frame(uint64_t session, const P2XRFrame *frame) {
                    frame->presentation_time < last_presentation_time) accepted = 0;
         else {
             latest_frame = *frame;
+            if (latest_input.spatial && !frame->controllers[1].tracked)
+                memset(&latest_input, 0, sizeof(latest_input));
             last_sequence = frame->sequence;
             last_presentation_time = frame->presentation_time;
         }
@@ -90,7 +101,7 @@ int p2_xr_publish_input(uint64_t session, const P2XRInput *input) {
     int accepted = session && session == active_session && input;
     if (accepted) {
         memset(&latest_input, 0, sizeof(latest_input));
-        if (latest_frame.tracked && input->connected &&
+        if ((window_session || latest_frame.tracked) && input->connected &&
             isfinite(input->move_x) && isfinite(input->move_y) && isfinite(input->turn_x) &&
             isfinite(input->blue_trigger) && isfinite(input->orange_trigger)) {
             latest_input = *input;
@@ -100,6 +111,8 @@ int p2_xr_publish_input(uint64_t session, const P2XRInput *input) {
             latest_input.blue_trigger = axis(input->blue_trigger, 0);
             latest_input.orange_trigger = axis(input->orange_trigger, 0);
             latest_input.buttons &= P2_XR_JUMP | P2_XR_CROUCH | P2_XR_USE | P2_XR_PAUSE | P2_XR_RECENTER;
+            if (!window_session && latest_input.spatial && !latest_frame.controllers[1].tracked)
+                memset(&latest_input, 0, sizeof(latest_input));
         }
     }
     pthread_mutex_unlock(&state_lock);
@@ -112,6 +125,21 @@ int p2_xr_read(uint64_t session, P2XRFrame *frame, P2XRInput *input) {
     if (input) { memset(input, 0, sizeof(*input)); if (valid) *input = latest_input; }
     pthread_mutex_unlock(&state_lock);
     return valid;
+}
+uint64_t p2_xr_read_latest(P2XRFrame *frame, P2XRInput *input) {
+    pthread_mutex_lock(&state_lock);
+    uint64_t session = latest_frame.tracked ? active_session : 0;
+    if (frame) { memset(frame, 0, sizeof(*frame)); if (session) *frame = latest_frame; }
+    if (input) { memset(input, 0, sizeof(*input)); if (session) *input = latest_input; }
+    pthread_mutex_unlock(&state_lock);
+    return session;
+}
+uint64_t p2_xr_read_controls(P2XRInput *input) {
+    pthread_mutex_lock(&state_lock);
+    uint64_t session = (window_session || latest_frame.tracked) ? active_session : 0;
+    if (input) { memset(input,0,sizeof(*input)); if (session) *input = latest_input; }
+    pthread_mutex_unlock(&state_lock);
+    return session;
 }
 void p2_xr_release_input(uint64_t session) {
     pthread_mutex_lock(&state_lock);
@@ -139,18 +167,28 @@ int p2_xr_align(const P2XRFrame *frame, vector_float3 origin, float yaw,
     *out = m;
     return 1;
 }
-int p2_xr_source_view(const P2XRFrame *frame, uint32_t eye,
-                      matrix_float4x4 transform, P2XRSourceView *out) {
-    if (!out || eye >= P2_XR_EYE_COUNT || !valid_frame(frame) || !finite_matrix(transform) ||
-        fabsf(simd_determinant(transform)) < 1e-8f) return 0;
-    matrix_float4x4 pose = simd_mul(transform, simd_mul(frame->tracking_from_head, frame->eyes[eye].head_from_eye));
+static void source_pose(matrix_float4x4 pose, P2XRSourceView *out) {
     vector_float3 forward = simd_normalize(-pose.columns[2].xyz);
     vector_float3 right = simd_normalize(pose.columns[0].xyz), up = simd_normalize(pose.columns[1].xyz);
     float degrees = 180 / (float)M_PI;
     out->origin = pose.columns[3].xyz;
     out->angles = (vector_float3){atan2f(-forward.z, hypotf(forward.x, forward.y)) * degrees,
         atan2f(forward.y, forward.x) * degrees, atan2f(-right.z, up.z) * degrees};
+}
+int p2_xr_source_view(const P2XRFrame *frame, uint32_t eye,
+                      matrix_float4x4 transform, P2XRSourceView *out) {
+    if (!out || eye >= P2_XR_EYE_COUNT || !valid_frame(frame) || !finite_matrix(transform) ||
+        fabsf(simd_determinant(transform)) < 1e-8f) return 0;
+    source_pose(simd_mul(transform, simd_mul(frame->tracking_from_head, frame->eyes[eye].head_from_eye)), out);
     out->projection = frame->eyes[eye].projection;
+    return 1;
+}
+int p2_xr_source_controller(const P2XRFrame *frame, uint32_t hand,
+                           matrix_float4x4 transform, P2XRSourceView *out) {
+    if (!out || hand >= 2 || !valid_frame(frame) || !frame->controllers[hand].tracked ||
+        !finite_matrix(transform) || fabsf(simd_determinant(transform)) < 1e-8f) return 0;
+    source_pose(simd_mul(transform, frame->controllers[hand].tracking_from_aim), out);
+    out->projection = matrix_identity_float4x4;
     return 1;
 }
 int p2_xr_cross_portal(matrix_float4x4 portal, matrix_float4x4 *transform) {
