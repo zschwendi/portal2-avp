@@ -3,3 +3,5 @@ build/
 __pycache__/
 config/local.json
 deps/
+visionos/*.xcodeproj/
+visionos/*.xcworkspace/
