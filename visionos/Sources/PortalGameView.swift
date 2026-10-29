@@ -32,6 +32,9 @@ struct PortalGameView: View {
             }
             PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
             Text(status).font(.caption).foregroundStyle(.secondary)
+            if importFailed {
+                Button("Retry import") { Task { await prepareGame() } }
+            }
             if importing {
                 ProgressView(value: Double(importer.completedBytes), total: Double(max(importer.totalBytes,1)))
                 Text(importer.status).font(.caption).foregroundStyle(.secondary)
@@ -47,29 +50,7 @@ struct PortalGameView: View {
                 open(id: "game-window")
             }
             prepareControls()
-            if p2_vision_game_state() == 0 || p2_vision_game_state() == -1 {
-                let arguments = ProcessInfo.processInfo.arguments
-                if let index = arguments.firstIndex(of: "--import-content"), index+1 < arguments.count,
-                   let url = URL(string: arguments[index+1]) {
-                    importing = true
-                    status = "Importing your Portal 2 files from your Mac."
-                    do {
-                        let documents = FileManager.default.urls(for: .documentDirectory,in: .userDomainMask)[0]
-                        try await importer.run(manifestURL: url,documents: documents)
-                        importing = false
-                        status = "Game files imported."
-                    } catch {
-                        let error = error as NSError
-                        fputs("[vision-import] Failed: domain=\(error.domain) code=\(error.code)\n",stderr)
-                        importing = false
-                        importFailed = true
-                        status = "Import stopped. Keep your Mac and headset connected, then reopen to retry."
-                        return
-                    }
-                }
-            }
-            if p2_vision_game_state() == 1 { started = true; status = "The native engine is running." }
-            else if ProcessInfo.processInfo.arguments.contains("--engine-test") { start() }
+            await prepareGame()
         }
         .onChange(of: phase) { _, value in
             PortalController.suspend(session: controlsSession,value != .active)
@@ -79,6 +60,34 @@ struct PortalGameView: View {
             spatial?.stop()
             p2_xr_end_session(controlsSession)
         }
+    }
+    @MainActor private func prepareGame() async {
+        guard !importing else { return }
+        importFailed = false
+        if p2_vision_game_state() == 0 || p2_vision_game_state() == -1 {
+            let arguments = ProcessInfo.processInfo.arguments
+            if let index = arguments.firstIndex(of: "--import-content"), index+1 < arguments.count,
+               let url = URL(string: arguments[index+1]) {
+                importing = true
+                status = "Importing your Portal 2 files from your Mac."
+                do {
+                    let documents = FileManager.default.urls(for: .documentDirectory,in: .userDomainMask)[0]
+                    try await importer.run(manifestURL: url,documents: documents)
+                    importing = false
+                    status = "Game files imported."
+                } catch {
+                    let error = error as NSError
+                    let reason = error.userInfo[NSURLErrorNetworkUnavailableReasonKey] as? NSNumber
+                    fputs("[vision-import] Failed: domain=\(error.domain) code=\(error.code) network_reason=\(reason?.intValue ?? -1)\n",stderr)
+                    importing = false
+                    importFailed = true
+                    status = "Import stopped. Check Local Network access and your Mac connection, then retry."
+                    return
+                }
+            }
+        }
+        if p2_vision_game_state() == 1 { started = true; status = "The native engine is running." }
+        else if ProcessInfo.processInfo.arguments.contains("--engine-test") { start() }
     }
     @MainActor private func enterImmersive() async {
         opening = true

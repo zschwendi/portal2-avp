@@ -164,7 +164,8 @@ file and byte progress and starts the engine only after import succeeds.
 Existing matching files are reused after SHA-256 verification; different
 files are preserved under `Documents/Portal2 Import Backups`. Saves in
 `portal2-userdata` are outside the import allowlist. A failed import keeps
-completed files; relaunch with a current receipt to retry. A partially
+completed files; allow Local Network access and use Retry import, or relaunch
+with a current receipt if the source expired. A partially
 downloaded file starts again. There is no general game library/import UI yet.
 The protocol and Swift importer pass fixture tests; physical import throughput
 and gameplay remain separate acceptance steps.
