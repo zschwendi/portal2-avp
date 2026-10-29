@@ -112,12 +112,17 @@ accepted gameplay and the Mac test has been stopped. Vision Pro is the target.
 - Device automatic signing now succeeds, including the increased-memory
   entitlement. Deployment and physical gameplay remain separate gates.
 
-Current Python/native suite: 50 tests pass, including UBSan XR math/session
+Current Python/native suite: 53 tests pass, including UBSan XR math/session
 checks. Native runtime: 59 source units compile with warnings treated as
 errors. The offscreen GPU/SDL input probe passes, including capture from an
 engine-owned framebuffer with scissoring enabled and rejection of capture or
 publication without the correct current context. These are component checks,
 not campaign, stereo, device or performance acceptance.
+The importer also recovers from a deliberately truncated HTTP response in an
+actual Swift fixture. Large full/range server responses and early source EOF
+are checked; incomplete responses close immediately, and transferred-byte
+counters update during files. These fixes do not establish faster physical
+transfer or hardware gameplay acceptance.
 Focused guest SDL handle/refcount and restart checks also pass AddressSanitizer
 and UBSan. The broader native ABI run currently fails an existing SDL event
 timestamp assertion against Homebrew's SDL2 compatibility library; that suite

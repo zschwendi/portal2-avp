@@ -165,8 +165,10 @@ Existing matching files are reused after SHA-256 verification; different
 files are preserved under `Documents/Portal2 Import Backups`. Saves in
 `portal2-userdata` are outside the import allowlist. A failed import keeps
 completed files; allow Local Network access and use Retry import, or relaunch
-with a current receipt if the source expired. A partially
-downloaded file starts again. There is no general game library/import UI yet.
+with a current receipt if the source expired. Transient connection failures
+retry the current file up to three times, with short cancellable delays; size,
+hash, path and HTTP failures still stop the import. A partially downloaded file
+starts again. There is no general game library/import UI yet.
 The protocol and Swift importer pass fixture tests; physical import throughput
 and gameplay remain separate acceptance steps.
 

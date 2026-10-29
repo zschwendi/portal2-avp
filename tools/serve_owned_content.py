@@ -6,6 +6,7 @@ token: no directory listings, no writes, no path resolution from requests. The t
 is written only to the private --output receipt, never to stdout or request logs.
 """
 import argparse
+import errno
 import hashlib
 import http.server
 import json
@@ -162,12 +163,26 @@ def make_handler(token, manifest_body, table):
                     headers.append(("Content-Range", f"bytes {start}-{end}/{size}"))
                 self._reply(code, length, headers)
                 if not head and length:
+                    sent, phase = 0, "read"
                     try:
-                        sent = self.connection.sendfile(f, start, length)
-                        self.server.record("bytes_sent",sent)
+                        f.seek(start)
+                        while sent < length:
+                            phase = "read"
+                            block = f.read(min(1 << 20, length - sent))
+                            if not block:
+                                raise OSError(errno.EIO, "Source ended before the declared length")
+                            phase = "send"
+                            self.connection.sendall(block)
+                            sent += len(block)
+                            self.server.record("bytes_sent", len(block))
                         self.server.record("files_served",1)
-                    except (BrokenPipeError, ConnectionResetError):
+                    except OSError as error:
+                        # An incomplete Content-Length body must never leave
+                        # keep-alive waiting for bytes that will not arrive.
                         self.close_connection = True
+                        self.server.record("transfer_failures", 1)
+                        print(f"transfer failed: phase={phase} errno={error.errno} "
+                              f"sent={sent} expected={length}", file=sys.stderr, flush=True)
 
     return Handler
 
@@ -177,23 +192,33 @@ class OwnedContentServer(http.server.ThreadingHTTPServer):
 
     def __init__(self,*args,**kwargs):
         self.activity_lock = threading.Lock()
-        self.activity = {"manifest_requests":0,"files_served":0,"bytes_sent":0}
+        self.activity = {"manifest_requests":0,"files_served":0,"bytes_sent":0,"transfer_failures":0}
         self.activity_path = None
+        self.last_activity_write = 0.0
         super().__init__(*args,**kwargs)
 
     def record(self,key,value):
         with self.activity_lock:
             self.activity[key] += value
             self.activity["last_activity_at"] = time.time()
-            if self.activity_path:
+            now = time.monotonic()
+            if self.activity_path and (key != "bytes_sent" or now - self.last_activity_write >= 1):
                 path = Path(self.activity_path)
                 temporary = path.with_suffix(".tmp")
-                fd = os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
-                with os.fdopen(fd,"w") as stream: json.dump(self.activity,stream)
-                os.replace(temporary,path)
+                try:
+                    fd = os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+                    with os.fdopen(fd,"w") as stream: json.dump(self.activity,stream)
+                    os.replace(temporary,path)
+                    self.last_activity_write = now
+                except OSError as error:
+                    # Diagnostics are optional; a receipt failure must not
+                    # turn a healthy asset response into a partial body.
+                    print(f"activity write failed: errno={error.errno}",file=sys.stderr,flush=True)
 
     def handle_error(self, request, client_address):
-        print(f"request error: {sys.exc_info()[0].__name__}", file=sys.stderr)
+        error = sys.exc_info()[1]
+        print(f"request error: class={type(error).__name__} errno={getattr(error,'errno',None)}",
+              file=sys.stderr,flush=True)
 
 
 def prepare(roots, bind="127.0.0.1", port=0, advertise_host=None):

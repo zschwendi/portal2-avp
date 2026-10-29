@@ -16,6 +16,26 @@ spec = importlib.util.spec_from_file_location('owned_content', ROOT/'tools/serve
 server_api = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server_api)
 
+DRIVER = '''import Foundation
+@main struct Check {
+ @MainActor static func main() async throws {
+  let importer = PortalContentImporter()
+  do {
+   try await importer.run(manifestURL: URL(string: CommandLine.arguments[1])!, documents: URL(fileURLWithPath: CommandLine.arguments[2],isDirectory:true))
+  } catch {
+   fputs("IMPORT_ERROR \\(error.localizedDescription)\\n",stderr)
+   exit(2)
+  }
+  print(importer.status)
+  precondition(importer.completedBytes == importer.totalBytes)
+  for path in ["../escape","portal2-userdata/save.sav","/etc/passwd","game/portal2/../../escape","game/portal2//bad","game/portal2\\\\bad"] {
+   do { try PortalContentImporter.checkPath(path); fatalError("unsafe path accepted") }
+   catch is PortalContentImportError {}
+  }
+ }
+}
+'''
+
 
 class OwnedContentTests(unittest.TestCase):
     def setUp(self):
@@ -68,33 +88,63 @@ class OwnedContentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server_api.collect_files(self.roots)
 
-    @unittest.skipUnless(os.uname().sysname=='Darwin','Swift Apple frameworks required')
-    def test_real_swift_import_reuse_backup_and_symlink_rejection(self):
+    def build_importer(self):
         binary = self.root/'import-check'
         driver = self.root/'driver.swift'
-        driver.write_text('''import Foundation
-@main struct Check {
- @MainActor static func main() async throws {
-  let importer = PortalContentImporter()
-  do {
-   try await importer.run(manifestURL: URL(string: CommandLine.arguments[1])!, documents: URL(fileURLWithPath: CommandLine.arguments[2],isDirectory:true))
-  } catch {
-   fputs("IMPORT_ERROR \\(error.localizedDescription)\\n",stderr)
-   exit(2)
-  }
-  print(importer.status)
-  precondition(importer.completedBytes == importer.totalBytes)
-  for path in ["../escape","portal2-userdata/save.sav","/etc/passwd","game/portal2/../../escape","game/portal2//bad","game/portal2\\\\bad"] {
-   do { try PortalContentImporter.checkPath(path); fatalError("unsafe path accepted") }
-   catch is PortalContentImportError {}
-  }
- }
-}
-''')
+        driver.write_text(DRIVER)
         subprocess.run(['xcrun','swiftc','-DP2_GAME','-swift-version','5','-strict-concurrency=complete',
                         '-warnings-as-errors','-parse-as-library',
                         str(ROOT/'visionos/Sources/PortalContentImporter.swift'),str(driver),'-o',str(binary)],
                        check=True,capture_output=True,text=True)
+        return binary
+
+    @unittest.skipUnless(os.uname().sysname=='Darwin','Swift Apple frameworks required')
+    def test_real_swift_import_retries_truncated_transfer(self):
+        binary = self.build_importer()
+        token = self.url.split('/')[-2]
+        name = 'game/portal2/pak01_dir.vpk'
+        payload = self.payloads[name]
+        entry = next(f for f in self.manifest['files'] if f['path']==name)
+        route = f'/{token}/file/{entry["id"]}'
+        _, table = server_api.build_manifest(server_api.collect_files(self.roots))
+        base = server_api.make_handler(token,json.dumps(self.manifest).encode(),table)
+        hits = []
+
+        class Truncating(base):
+            def do_GET(self):
+                if self.path==route:
+                    hits.append(1)
+                    if len(hits)==1:  # full headers, half the body, then drop the connection
+                        self.send_response(200)
+                        self.send_header('Content-Length',str(len(payload)))
+                        self.end_headers()
+                        self.wfile.write(payload[:len(payload)//2])
+                        self.close_connection = True
+                        return
+                super().do_GET()
+
+        self.server.RequestHandlerClass = Truncating
+        docs = self.root/'documents'
+        dest = docs/name
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b'old asset')
+        save = docs/'portal2-userdata/save.sav'
+        save.parent.mkdir()
+        save.write_bytes(b'preserve save')
+        result = subprocess.run([binary,self.url,docs],capture_output=True,text=True,timeout=180)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('Imported 3 files',result.stdout)
+        self.assertEqual(len(hits),2)
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(),entry['sha256'])
+        self.assertEqual(save.read_bytes(),b'preserve save')
+        backups = list((docs/'Portal2 Import Backups').rglob('pak01_dir.vpk'))
+        self.assertEqual([b.read_bytes() for b in backups],[b'old asset'])
+        self.assertEqual(list((docs/'Portal2 Import Staging').iterdir()),[])
+        self.assertNotIn(token,result.stdout+result.stderr)
+
+    @unittest.skipUnless(os.uname().sysname=='Darwin','Swift Apple frameworks required')
+    def test_real_swift_import_reuse_backup_and_symlink_rejection(self):
+        binary = self.build_importer()
         docs = self.root/'documents'
         dest = docs/'game/portal2/pak01_dir.vpk'
         dest.parent.mkdir(parents=True)

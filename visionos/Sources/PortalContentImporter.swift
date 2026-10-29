@@ -53,6 +53,9 @@ final class PortalContentImporter: ObservableObject {
         } catch is CancellationError {
             status = "Import cancelled; completed files were kept"
             throw CancellationError()
+        } catch let error as URLError {
+            status = "Import failed: network error (\(URLError.errorDomain) \(error.code.rawValue))"
+            throw error
         } catch {
             status = "Import failed: \(error.localizedDescription)"
             throw error
@@ -76,7 +79,7 @@ final class PortalContentImporter: ObservableObject {
         totalBytes = 0
 
         status = "Fetching manifest"
-        let manifestFile = try await transfer.download(try Self.url(base, "manifest.json")) { _ in }
+        let manifestFile = try await fetch(transfer, try Self.url(base, "manifest.json"), label: "manifest") { _ in }
         defer { Self.removeStaged(manifestFile,documents: documents) }
         let manifestSize = (try fm.attributesOfItem(atPath: manifestFile.path)[.size] as? NSNumber)?.int64Value ?? 0
         guard manifestSize <= 64 << 20 else { throw PortalContentImportError.badManifest("too large") }
@@ -98,7 +101,7 @@ final class PortalContentImporter: ObservableObject {
             }
             status = "Downloading \(label)"
             let start = done, bytes = file.bytes
-            let staged = try await transfer.download(try Self.url(base, "file/\(file.id)")) { [weak self] written in
+            let staged = try await fetch(transfer, try Self.url(base, "file/\(file.id)"), label: label) { [weak self] written in
                 Task { @MainActor in
                     guard let self, self.runID == generation else { return }
                     self.completedBytes = max(self.completedBytes, start + min(written, bytes))
@@ -122,6 +125,32 @@ final class PortalContentImporter: ObservableObject {
         }
         let size = ByteCountFormatter.string(fromByteCount: done, countStyle: .file)
         status = "Imported \(fetched) files, reused \(reused) (\(size))"
+    }
+
+    // Seconds before each retry: initial attempt plus three. Each retry restarts only the current file.
+    nonisolated static let retryDelays: [UInt64] = [1, 2, 4]
+
+    nonisolated static func isTransient(_ error: URLError) -> Bool {
+        switch error.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost: return true
+        default: return false
+        }
+    }
+
+    // Retries only transient connection failures; HTTP, origin, size/hash and cancellation errors propagate unchanged.
+    private func fetch(_ transfer: PortalTransfer, _ url: URL, label: String,
+                       progress: @escaping @Sendable (Int64) -> Void) async throws -> URL {
+        for (attempt, delay) in Self.retryDelays.enumerated() {
+            do {
+                return try await transfer.download(url, progress: progress)
+            } catch let error as URLError where Self.isTransient(error) {
+                // Status carries only the error domain and code, never the URL or token.
+                status = "Network interrupted (\(URLError.errorDomain) \(error.code.rawValue)); retrying \(label) in \(delay)s"
+                try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                status = "Downloading \(label) (attempt \(attempt + 2)/\(Self.retryDelays.count + 1))"
+            }
+        }
+        return try await transfer.download(url, progress: progress)
     }
 
     // Preserves any existing item under a unique backup path, then atomically renames the verified file in.
