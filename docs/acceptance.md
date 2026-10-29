@@ -27,6 +27,9 @@ evidence; physical gameplay remains a separate gate.
    for jump. Require distinct gestures, neutral/release on tracking loss and
    practical reliability while moving. Omit the feature if it cannot meet
    that bar. No hand gesture is a prerequisite for controller play.
+6. **Final polish:** add an original Portal-themed app icon after the gameplay
+   and input gates, using blue/orange portals and a test-chamber visual theme.
+   Prepare the appropriate icon assets for visionOS and iPad/iPhone.
 
 Campaign/content mods and multiplayer keep their original compatibility
 goals, but Steam authentication, matchmaking and Workshop are not supplied
