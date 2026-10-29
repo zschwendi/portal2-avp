@@ -1,0 +1,136 @@
+name: Portal2AVP
+options:
+  deploymentTarget:
+    visionOS: "2.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    PRODUCT_BUNDLE_IDENTIFIER: dev.zschwendi.portal2avp.renderercheck
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: "0.1.0"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Portal2Game:
+    type: application
+    platform: visionOS
+    entitlements:
+      path: Game.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+    sources:
+      - path: Sources
+      - path: Shaders
+    info:
+      path: Game-Info.plist
+      properties:
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+          - ProfileName: SpatialGamepad
+        NSLocalNetworkUsageDescription: Import your Portal 2 game files from your Mac.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zschwendi.portal2avp.enginetest
+        ARCHS: arm64
+        ENABLE_DEBUG_DYLIB: NO
+        SWIFT_OBJC_BRIDGING_HEADER: Portal2XR-Bridging-Header.h
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) P2_GAME
+        GCC_PREPROCESSOR_DEFINITIONS: $(inherited) P2_GAME=1
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Portal 2 Engine Test
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_NSWorldSensingUsageDescription: Head tracking places Portal 2 around you.
+        INFOPLIST_KEY_NSAccessoryTrackingUsageDescription: Track your Sense controllers to aim and interact in Portal 2.
+        TARGETED_DEVICE_FAMILY: 7
+        P2_HOST_DEPS: $(SRCROOT)/../deps/visionos/device
+        "P2_HOST_DEPS[sdk=xrsimulator*]": $(SRCROOT)/../deps/visionos/sim
+        P2_GAME_ARCHIVE: $(SRCROOT)/../build/visionos/game-device/libportal2-game.a
+        "P2_GAME_ARCHIVE[sdk=xrsimulator*]": $(SRCROOT)/../build/visionos/game-sim/libportal2-game.a
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(P2_HOST_DEPS)/Frameworks
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -Wl,-force_load,$(P2_GAME_ARCHIVE)
+          - -L$(P2_HOST_DEPS)/lib
+          - -lSDL2
+          - -lgl4es
+          - -lfreetype
+          - -lopenal
+          - -lc++
+          - -liconv
+          - -lobjc
+          - -framework
+          - libGLESv2
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/Frameworks
+    dependencies:
+      - sdk: CompositorServices.framework
+      - sdk: ARKit.framework
+      - sdk: MetalKit.framework
+      - sdk: IOSurface.framework
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: CoreVideo.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreMotion.framework
+      - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreBluetooth.framework
+    postCompileScripts:
+      - name: Embed native ANGLE frameworks
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          for framework in libEGL libGLESv2; do
+            ditto "$P2_HOST_DEPS/Frameworks/$framework.framework" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/$framework.framework"
+            if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/$framework.framework"
+            fi
+          done
+  Portal2RendererCheck:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Sources
+      - path: Shaders
+      - path: ../runtime/visionos/p2_xr.c
+    info:
+      path: RendererCheck-Info.plist
+      properties:
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+          - ProfileName: SpatialGamepad
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: Portal2XR-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../runtime/visionos
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) P2_XR_CALIBRATION
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Portal 2 Renderer Check
+        INFOPLIST_KEY_NSWorldSensingUsageDescription: Head tracking places the stereo renderer check around you.
+        INFOPLIST_KEY_NSAccessoryTrackingUsageDescription: Track your Sense controllers for the native input bridge check.
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        TARGETED_DEVICE_FAMILY: 7
+    dependencies:
+      - sdk: CompositorServices.framework
+      - sdk: ARKit.framework
+      - sdk: Metal.framework
+      - sdk: GameController.framework
+schemes:
+  Portal2Game:
+    build:
+      targets:
+        Portal2Game: all
+  Portal2RendererCheck:
+    build:
+      targets:
+        Portal2RendererCheck: all

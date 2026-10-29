@@ -261,6 +261,28 @@ RT_CHECK(sdl_input_joysticks_and_struct_return) {
 }
 
 int rt_sdl_event_is_sdl2(uint32_t type);
+RT_CHECK(sdl_input_handles_survive_subsystem_restart) {
+    CPU cpu, *c = &cpu; rt_cpu_reset(c);
+    for (int pass = 0; pass < 3; ++pass) {
+        assert(!SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER));
+        int index = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER,6,15,0);
+        assert(index >= 0);
+        uint32_t ia[] = {(uint32_t)index};
+        uint32_t controller = call(c,"SDL_GameControllerOpen",ia,1);
+        assert(controller);
+        uint32_t ca[] = {controller};
+        uint32_t joystick = call(c,"SDL_GameControllerGetJoystick",ca,1);
+        assert(joystick);
+        // Reproduce engine startup freeing host devices with guest handles
+        // still outstanding. A stale access must return SDL's NULL result.
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK);
+        assert(call(c,"SDL_GameControllerGetJoystick",ca,1) == 0);
+        uint32_t ja[] = {joystick};
+        assert((int32_t)call(c,"SDL_JoystickInstanceID",ja,1) == -1);
+        assert(!rt_handle_get(controller,'SDLK') && !rt_handle_get(joystick,'SDLJ'));
+    }
+}
+
 RT_CHECK(sdl_input_hides_sdl3_only_events) {
     assert(rt_sdl_event_is_sdl2(SDL_WINDOWEVENT) && rt_sdl_event_is_sdl2(SDL_KEYDOWN));
     assert(rt_sdl_event_is_sdl2(SDL_USEREVENT + 7) && rt_sdl_event_is_sdl2(SDL_DROPFILE));
