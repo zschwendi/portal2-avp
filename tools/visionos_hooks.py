@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import tempfile
 
 from elfprep import Elf
 
@@ -72,12 +73,17 @@ def audit(path):
 
 def write_header(path, result):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('#pragma once\n' +
+    source = ('#pragma once\n' +
         f'#define P2_XR_CLIENT_VTABLE_RVA 0x{result["vtable_rva"]:x}u\n' +
         f'#define P2_XR_RENDER_VIEW_RVA 0x{result["render_view_rva"]:x}u\n' +
         f'#define P2_XR_VIEW_SETUP_SIZE {result["setup_size"]}u\n' +
         'static const unsigned char p2_xr_render_signature[] = {' +
         ','.join('0x'+result['signature'][i:i+2] for i in range(0,len(result['signature']),2))+'};\n')
+    if path.is_file() and path.read_text() == source:
+        return
+    with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,prefix='.xr-profile-',delete=False) as temporary:
+        temporary.write(source)
+    Path(temporary.name).replace(path)
 
 
 def main():

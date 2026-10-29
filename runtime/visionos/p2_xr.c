@@ -103,14 +103,15 @@ int p2_xr_publish_input(uint64_t session, const P2XRInput *input) {
         memset(&latest_input, 0, sizeof(latest_input));
         if ((window_session || latest_frame.tracked) && input->connected &&
             isfinite(input->move_x) && isfinite(input->move_y) && isfinite(input->turn_x) &&
-            isfinite(input->blue_trigger) && isfinite(input->orange_trigger)) {
+            isfinite(input->look_y) && isfinite(input->blue_trigger) && isfinite(input->orange_trigger)) {
             latest_input = *input;
             latest_input.move_x = axis(input->move_x, -1);
             latest_input.move_y = axis(input->move_y, -1);
             latest_input.turn_x = axis(input->turn_x, -1);
+            latest_input.look_y = axis(input->look_y, -1);
             latest_input.blue_trigger = axis(input->blue_trigger, 0);
             latest_input.orange_trigger = axis(input->orange_trigger, 0);
-            latest_input.buttons &= P2_XR_JUMP | P2_XR_CROUCH | P2_XR_USE | P2_XR_PAUSE | P2_XR_RECENTER;
+            latest_input.buttons &= P2_XR_JUMP | P2_XR_CROUCH | P2_XR_USE | P2_XR_PAUSE | P2_XR_RECENTER | P2_XR_WINDOW;
             if (!window_session && latest_input.spatial && !latest_frame.controllers[1].tracked)
                 memset(&latest_input, 0, sizeof(latest_input));
         }

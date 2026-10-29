@@ -15,3 +15,4 @@ int p2_vision_poll_event(SDL_Event *event);
 #define SDL_GL_SetSwapInterval p2_vision_gl_swap_interval
 #define SDL_GL_LoadLibrary p2_vision_gl_load_library
 #define SDL_GL_UnloadLibrary p2_vision_gl_unload_library
+#define SDL_GL_SetAttribute p2_vision_gl_set_attribute

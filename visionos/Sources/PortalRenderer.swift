@@ -5,6 +5,9 @@ import Metal
 import QuartzCore
 import simd
 import SwiftUI
+#if P2_GAME
+import IOSurface
+#endif
 
 struct PortalLayerConfiguration: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities,
@@ -35,6 +38,11 @@ final class PortalRenderer: @unchecked Sendable {
     private var originFromScene: simd_float4x4?
     private var firstFrame = true
     private var spatial: (any PortalSpatialSource)?
+    #if P2_GAME
+    private let menuPipeline: MTLRenderPipelineState
+    private var anchors: [UInt64: DeviceAnchor] = [:]
+    private var reportedGame = false
+    #endif
 
     private struct Vertex {
         var position: SIMD3<Float>
@@ -67,9 +75,14 @@ final class PortalRenderer: @unchecked Sendable {
     private init(layer: LayerRenderer) throws {
         self.layer = layer
         let device = layer.device
+        #if P2_GAME
+        let vertexName = "p2_game_vertex", fragmentName = "p2_world_fragment"
+        #else
+        let vertexName = "p2_calibration_vertex", fragmentName = "p2_calibration_fragment"
+        #endif
         guard let queue = device.makeCommandQueue(), let library = device.makeDefaultLibrary(),
-              let vertex = library.makeFunction(name: "p2_calibration_vertex"),
-              let fragment = library.makeFunction(name: "p2_calibration_fragment") else {
+              let vertex = library.makeFunction(name: vertexName),
+              let fragment = library.makeFunction(name: fragmentName) else {
             throw NSError(domain: "Portal2XR", code: 1, userInfo: [NSLocalizedDescriptionKey: "Metal resources unavailable"])
         }
         self.queue = queue
@@ -79,6 +92,11 @@ final class PortalRenderer: @unchecked Sendable {
         descriptor.colorAttachments[0].pixelFormat = layer.configuration.colorFormat
         descriptor.depthAttachmentPixelFormat = layer.configuration.depthFormat
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        #if P2_GAME
+        descriptor.vertexFunction = library.makeFunction(name: "p2_menu_vertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "p2_menu_fragment")
+        menuPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        #endif
         let depthDescriptor = MTLDepthStencilDescriptor()
         depthDescriptor.isDepthWriteEnabled = true
         depthDescriptor.depthCompareFunction = .greaterEqual
@@ -181,10 +199,21 @@ final class PortalRenderer: @unchecked Sendable {
             xr.eyes.0.projection = drawable.computeProjection(convention: .rightUpBack, viewIndex: 0)
             xr.eyes.1.projection = drawable.computeProjection(convention: .rightUpBack, viewIndex: 1)
         }
+        #if P2_GAME
+        #if !targetEnvironment(simulator)
+        if let anchor, tracked {
+            anchors[sequence] = anchor
+            anchors = anchors.filter { sequence - $0.key < 96 }
+        }
+        #endif
+        #endif
         // Recording drawables cannot replace the built-in headset pose/input.
         if #available(visionOS 26.0, *) {
             if drawable.target == .builtIn { p2_xr_publish_frame(session, &xr) }
         } else { p2_xr_publish_frame(session, &xr) }
+        #if P2_GAME
+        encodeGame(drawable: drawable,command: command,tracked: tracked,currentAnchor: anchor)
+        #else
         if originFromScene == nil {
             var origin = matrix_identity_float4x4
             origin.columns.3 = SIMD4(head.columns.3.x, head.columns.3.y - 1.6, head.columns.3.z, 1)
@@ -242,7 +271,90 @@ final class PortalRenderer: @unchecked Sendable {
                       buffer.status.rawValue, tracked ? 1 : 0, eyeCount, simulated ? 1 : 0)
             }
         }
+        #endif
     }
+
+    #if P2_GAME
+    private func gameTexture(_ pointer: UnsafeMutableRawPointer?,frame: P2VisionGLFrame) -> MTLTexture? {
+        guard let pointer else { return nil }
+        let surface = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb,
+            width: Int(frame.width),height: Int(frame.height),mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        return layer.device.makeTexture(descriptor: descriptor,iosurface: surface,plane: 0)
+    }
+
+    private func encodeGame(drawable: LayerRenderer.Drawable,command: MTLCommandBuffer,
+                            tracked: Bool,currentAnchor: DeviceAnchor?) {
+        var frame = P2VisionGLFrame()
+        let leased = p2_vision_gl_acquire(&frame) != 0
+        let stereo = leased && frame.kind == P2_VISION_TRACKED_STEREO.rawValue &&
+            frame.eye_count == 2 && frame.xr_session == session && frame.render_pose.tracked != 0
+        let sourceAnchor = stereo ? anchors[frame.render_pose.sequence] : nil
+        let worldReady = tracked && stereo && sourceAnchor != nil
+        let menuReady = tracked && leased && frame.kind == P2_VISION_MONO.rawValue
+        // The anchor must be the pose that rendered these pixels. A newer
+        // compositor pose must never be attached to a stale engine image.
+        #if !targetEnvironment(simulator)
+        if worldReady { drawable.deviceAnchor = sourceAnchor }
+        else if menuReady { drawable.deviceAnchor = currentAnchor }
+        #endif
+        let left = leased ? gameTexture(frame.surface,frame: frame) : nil
+        let right = stereo ? gameTexture(frame.right_surface,frame: frame) : nil
+        for (eye,view) in drawable.views.enumerated() {
+            let index = view.textureMap.textureIndex, slice = view.textureMap.sliceIndex
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = drawable.colorTextures[index]
+            pass.colorAttachments[0].slice = slice
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.005,green: 0.007,blue: 0.01,alpha: 1)
+            pass.depthAttachment.texture = drawable.depthTextures[index]
+            pass.depthAttachment.slice = slice
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.storeAction = .store
+            pass.depthAttachment.clearDepth = 0
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { continue }
+            encoder.setViewport(view.textureMap.viewport)
+            encoder.setDepthStencilState(depth)
+            let texture = eye == 1 ? right : left
+            if worldReady, let texture {
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setFragmentTexture(texture,index: 0)
+                let sourceProjection = eye == 1 ? frame.render_pose.eyes.1.projection : frame.render_pose.eyes.0.projection
+                var crop = sourceProjection * simd_inverse(drawable.computeProjection(convention: .rightUpBack,viewIndex: eye))
+                encoder.setFragmentBytes(&crop,length: MemoryLayout<simd_float4x4>.stride,index: 1)
+                // Color-only world submission uses far depth. Positional
+                // reprojection awaits actual engine depth export; fresh game
+                // frames still render from both complete six-DoF eye poses.
+                encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 3)
+            } else if menuReady, let left {
+                encoder.setRenderPipelineState(menuPipeline)
+                encoder.setFragmentTexture(left,index: 0)
+                var panel = matrix_identity_float4x4
+                panel.columns.0.x = 0.8
+                panel.columns.1.y = 0.8 * Float(frame.height) / Float(frame.width)
+                panel.columns.3.z = -2
+                var mvp = drawable.computeProjection(convention: .rightUpBack,viewIndex: eye) * simd_inverse(view.transform) * panel
+                encoder.setVertexBytes(&mvp,length: MemoryLayout<simd_float4x4>.stride,index: 1)
+                encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 6)
+            }
+            encoder.endEncoding()
+        }
+        if leased {
+            let slot = frame.slot
+            command.addCompletedHandler { _ in p2_vision_gl_release(slot) }
+        }
+        if worldReady && !reportedGame {
+            reportedGame = true
+            let pose = frame.render_pose.sequence, image = frame.sequence
+            command.addCompletedHandler { buffer in
+                NSLog("[P2XR] Game stereo GPU submission completed: image=%llu pose=%llu eyes=2 status=%lu; physical acceptance pending",image,pose,buffer.status.rawValue)
+            }
+        }
+    }
+    #endif
 
     private static func calibrationMesh() -> [Vertex] {
         var mesh: [Vertex] = []

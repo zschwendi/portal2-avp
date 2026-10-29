@@ -4,12 +4,13 @@ This fork starts from [kanapitsas/portal2-recomp](https://github.com/kanapitsas/
 **No playable immersive visionOS build is verified yet.** Development includes
 a CompositorServices renderer check, a Metal-backed offscreen GL host, a native
 engine-test window, DualSense/Sense input adapters and tested pose/portal math.
-The actual engine, stereo hooks and physical controls still need acceptance.
-No Vision Pro gameplay,
-multiplayer, Workshop, or campaign-completion claim is made for this fork.
+The real menu and opening campaign room have rendered in a visionOS simulator
+window. Sustained play, stereo and physical controllers still need acceptance.
+No headset gameplay, multiplayer, Workshop or campaign-completion claim is made.
 
 - [visionOS status, research, implementation path](docs/visionos.md)
 - [Build and verify the renderer check](AVP-INSTALL.md)
+- [Windowed-first acceptance and controller priorities](docs/acceptance.md)
 - Prerequisite report: `python3 tools/visionos.py --preflight`
 - Native XR tests: `python3 -m unittest discover -s tests -p test_visionos_xr.py -v`
 
@@ -18,6 +19,8 @@ PSVR2 Sense, plus windowed visionOS and iPad/iPhone. The renderer check is a
 diagnostic with a grid and boxes, contains no game
 code or retail assets, and is named separately from the eventual game app.
 The upstream Mac/iPhone documentation below describes **upstream support**.
+Windowed gameplay is the first gate; smooth switching to immersive follows.
+Optional hand controls come after both controller paths.
 
 ---
 

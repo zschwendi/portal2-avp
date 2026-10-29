@@ -73,12 +73,19 @@ accepted gameplay and the Mac test has been stopped. Vision Pro is the target.
   simulator GPU probe verifies pixels before/after resize and physical row
   orientation; no game data is involved in that probe.
 - `PortalGameView` is a native Metal window for real engine frames. The full
-  visionOS and iOS simulator game compiles are in progress at this checkpoint;
-  **no real visionOS engine frame has been observed yet**.
+  visionOS simulator game builds and launches; its real menu and opening
+  campaign room have been visually observed. The full iOS simulator and
+  visionOS device engines also compile. An isolated iPad simulator rendered
+  the opening room through the inherited UIKit/EAGL path. Physical gameplay
+  acceptance remains open, following the [windowed-first gates](acceptance.md).
 - `tools/visionos_hooks.py` verifies the owned client SHA-256 and derives its
   `CViewRender` table from RTTI. `view_vision.c` optionally installs a
-  pass-through `RenderView` audit with loaded-byte and camera-layout checks.
-  Its layout has not been runtime-validated. No Windows hook offsets are used.
+  `RenderView` hook with loaded-byte and camera-layout checks. The 260-byte
+  Linux camera layout has been exercised in the real campaign. An optional
+  fixed-separation diagnostic calls the original renderer twice and captures
+  each final target into separate IOSurfaces; it never claims physical
+  tracking. No Windows hook offsets are used. Physical tracked stereo,
+  portal crossings and clipping still require acceptance.
 - PSVR2 Sense uses fixed hardware chirality, two independent GameController
   profiles and ARKit-predicted aim/grip poses at the headset presentation time.
   Duplicate hand identities and orientation-only tracking are rejected.
@@ -87,11 +94,25 @@ accepted gameplay and the Mac test has been stopped. Vision Pro is the target.
 - Window input sessions do not invent a head pose or require accessory motion
   permission. The immersive session requires tracked headset/eye data. Session
   retirement prevents an old window or render thread from publishing controls.
+- A real-engine synthetic input audit caught a detached native SDL pad after
+  engine input startup. The host now safely reopens/reattaches it by instance
+  ID. Guest joystick/controller handles also reject stale native instances
+  across SDL teardown. The corrected audit moves the actual player, changes
+  pitch/yaw, pauses and resumes; save/reload has also run. Warm simulator
+  rendering held roughly 60 fps for several minutes, with long cold-loading
+  stalls still present. Neither hardware controls nor smooth performance on
+  Vision Pro is established by these results.
+- Immersive entry is opt-in through `--immersive-test` during development.
+  The normal candidate opens windowed so controller acceptance can come first.
 
 Current Python/native suite: 47 tests pass, including UBSan XR math/session
-checks. Native runtime audit: 58 source units compile with warnings treated as
+checks. Native runtime: 59 source units compile with warnings treated as
 errors. The offscreen GPU/SDL input probe passes. These are component checks,
 not campaign, stereo, device or performance acceptance.
+Focused guest SDL handle/refcount and restart checks also pass AddressSanitizer
+and UBSan. The broader native ABI run currently fails an existing SDL event
+timestamp assertion against Homebrew's SDL2 compatibility library; that suite
+is not reported as passing. The mobile targets use the pinned SDL2 source.
 
 ## Work needed for a playable build
 
@@ -122,8 +143,8 @@ not campaign, stereo, device or performance acceptance.
 
 | Feature | Current evidence / next gate |
 | --- | --- |
-| Native fully immersive gameplay | Not implemented; native host/probe builds, full engine integration and stereo acceptance pending |
-| Windowed visionOS; iPhone/iPad | Engine-test window and upstream iOS path build work in progress; actual gameplay acceptance pending |
+| Native fully immersive gameplay | Paired capture and game compositor integration in development; physical stereo, aiming, portal behavior and performance pending |
+| Windowed visionOS; iPhone/iPad | VisionOS simulator real movement/look/pause and save/reload exercised; native iPad simulator room observed; physical controls/playability pending |
 | DualSense / PSVR2 Sense | Native input/pose adapters and synthetic SDL route pass; hardware controls and game aiming unverified |
 | Original campaign/physics/saves | Aim to retain original recompiled code and content; visionOS behavior untested |
 | Content mods/custom maps | Preserve the retail filesystem and archives; actual mounting and playthrough untested |

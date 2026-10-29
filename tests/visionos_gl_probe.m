@@ -32,7 +32,7 @@ static int input_route(void) {
     SDL_GameController *controller = SDL_GameControllerOpen(0);
     if (!controller) return 0;
     uint64_t session = p2_xr_begin_window_session();
-    P2XRInput input = {.connected=1,.move_x=0.5f,.move_y=-0.25f,
+    P2XRInput input = {.connected=1,.move_x=0.5f,.move_y=-0.25f,.turn_x=-0.75f,.look_y=0.5f,
         .blue_trigger=1,.orange_trigger=0.5f,.buttons=P2_XR_JUMP|P2_XR_USE};
     p2_xr_publish_input(session,&input);
     p2_vision_input_poll(); SDL_JoystickUpdate();
@@ -45,6 +45,8 @@ static int input_route(void) {
         SDL_GameControllerGetButton(controller,SDL_CONTROLLER_BUTTON_X));
     int valid = abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_LEFTX)-16384) <= 1 &&
         abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_LEFTY)-8192) <= 1 &&
+        abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_RIGHTX)+24575) <= 1 &&
+        abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_RIGHTY)+16384) <= 1 &&
         SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_TRIGGERRIGHT) == 32767 &&
         abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_TRIGGERLEFT)-16383) <= 1 &&
         SDL_GameControllerGetButton(controller,SDL_CONTROLLER_BUTTON_A) &&
@@ -57,7 +59,22 @@ static int input_route(void) {
         !SDL_GameControllerGetButton(controller,SDL_CONTROLLER_BUTTON_A);
     p2_xr_end_session(session);
     SDL_GameControllerClose(controller);
+    // The real guest cycles SDL input while starting. Its shutdown invalidates
+    // host joystick pointers too; polling must rebuild one usable native pad.
+    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK);
+    p2_vision_input_poll();
+    controller = SDL_GameControllerOpen(0);
+    session = p2_xr_begin_window_session();
+    input = (P2XRInput){.connected=1,.move_x=-0.5f,.buttons=P2_XR_PAUSE};
+    p2_xr_publish_input(session,&input);
+    p2_vision_input_poll(); SDL_JoystickUpdate();
+    valid = valid && controller && SDL_NumJoysticks() == 1 &&
+        abs(SDL_GameControllerGetAxis(controller,SDL_CONTROLLER_AXIS_LEFTX)+16384) <= 1 &&
+        SDL_GameControllerGetButton(controller,SDL_CONTROLLER_BUTTON_START);
+    p2_xr_end_session(session);
+    SDL_GameControllerClose(controller);
     fprintf(stderr,"[P2-INPUT-PROBE] %s: synthetic native snapshot -> SDL gamepad, trigger polarity and disconnect release; physical controls unverified\n",valid ? "PASS" : "FAIL");
+    fprintf(stderr,"[P2-INPUT-PROBE] %s: native gamepad recovers after guest SDL input subsystem shutdown\n",valid ? "PASS" : "FAIL");
     return valid;
 }
 
@@ -67,7 +84,16 @@ int main(void) {
         SDL_SetMainReady();
         if (SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL init: %s\n", SDL_GetError()); return 1; }
         if (p2_vision_gl_load_library(NULL)) return 6;
+        if (p2_vision_gl_set_attribute(SDL_GL_RED_SIZE,8) ||
+            p2_vision_gl_set_attribute(SDL_GL_DEPTH_SIZE,24) ||
+            p2_vision_gl_set_attribute(SDL_GL_STENCIL_SIZE,8) ||
+            !p2_vision_gl_set_attribute(SDL_GL_MULTISAMPLESAMPLES,16)) return 7;
         SDL_Window *window = p2_vision_create_window("GL probe", 0, 0, 128, 96, SDL_WINDOW_OPENGL);
+        if (!window || SDL_GetKeyboardFocus() != window ||
+            !(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+            fprintf(stderr,"[P2-INPUT-PROBE] FAIL: engine bookkeeping window lacks input focus\n");
+            return 8;
+        }
         SDL_GLContext context = window ? rt_ios_gl_create_context(window) : NULL;
         if (!context) { fprintf(stderr, "GL context: %s\n", SDL_GetError()); return 2; }
         void (*clear_color)(float,float,float,float) = rt_host_gl_symbol(NULL, "glClearColor");
@@ -105,6 +131,26 @@ int main(void) {
             valid = valid && first[3] == 255 && last[3] == 255 && first[0] != last[0] && first[2] != last[2];
             IOSurfaceUnlock(storage,kIOSurfaceLockReadOnly,NULL);
             p2_vision_gl_release(oriented.slot);
+        } else valid = 0;
+        // Two independent eye surfaces must survive one paired publication.
+        p2_vision_gl_begin_eye(0);
+        clear_color(0.2f,0.4f,0.6f,1); clear(0x4000);
+        p2_vision_gl_begin_eye(1);
+        clear_color(0.8f,0.6f,0.4f,1); clear(0x4000);
+        valid = p2_vision_gl_mark_stereo(0,NULL,1) && valid;
+        rt_ios_gl_swap_window(window);
+        P2VisionGLFrame pair;
+        if (p2_vision_gl_acquire(&pair)) {
+            IOSurfaceRef left = (IOSurfaceRef)pair.surface, right = (IOSurfaceRef)pair.right_surface;
+            IOSurfaceLock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceLock(right,kIOSurfaceLockReadOnly,NULL);
+            unsigned char *l = IOSurfaceGetBaseAddress(left), *r = IOSurfaceGetBaseAddress(right);
+            valid = valid && pair.eye_count == 2 && pair.kind == P2_VISION_DIAGNOSTIC_STEREO &&
+                !pair.xr_session && !pair.render_pose.tracked && left != right &&
+                abs((int)l[0]-153)<=2 && abs((int)l[2]-51)<=2 && abs((int)r[0]-102)<=2 && abs((int)r[2]-204)<=2;
+            fprintf(stderr,"[P2-GL-PROBE] paired left BGRA=%u,%u,%u right=%u,%u,%u eyes=%u kind=%u tracked=%u\n",
+                l[0],l[1],l[2],r[0],r[1],r[2],pair.eye_count,pair.kind,pair.render_pose.tracked);
+            IOSurfaceUnlock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceUnlock(right,kIOSurfaceLockReadOnly,NULL);
+            p2_vision_gl_release(pair.slot);
         } else valid = 0;
         p2_vision_gl_delete_context(context);
         valid = input_route() && valid;

@@ -11,6 +11,8 @@ final class PortalController {
     private let spatial: (any PortalSpatialSource)?
     private var timer: Timer?
     private var suspended = false
+    private var windowHold: Date?
+    private var requestedWindow = false
     private static var active: PortalController?
 
     init(session: UInt64, spatial: (any PortalSpatialSource)?) {
@@ -37,17 +39,36 @@ final class PortalController {
 
     private func selectController() {
         p2_xr_release_input(session)
-        controller = GCController.controllers().first {
+        let controllers = GCController.controllers()
+        Self.reportControllers()
+        controller = controllers.first {
             if #available(visionOS 26.0, *), $0.productCategory == GCProductCategorySpatialController { return false }
+#if targetEnvironment(simulator)
+            // CoreSimulator exposes this synthetic MFi pad even when the Mac
+            // has no controller. Only the explicit automated input audit
+            // ignores it; real DualSense/Sense connections still cancel it.
+            if ProcessInfo.processInfo.environment["P2_VISION_INPUT_AUDIT"] == "1",
+               $0.productCategory == GCProductCategoryMFi, $0.vendorName == "Gamepad" { return false }
+#endif
             return $0.extendedGamepad != nil
         }
         publish()
+    }
+
+    static func reportControllers() {
+        let devices = GCController.controllers()
+        fputs("[P2XR] Available controllers: \(devices.count)\n",stderr)
+        for device in devices {
+            let line = "[P2XR] Controller: category=\(device.productCategory) vendor=\(device.vendorName ?? "unknown") extended=\(device.extendedGamepad != nil) snapshot=\(device.isSnapshot)\n"
+            fputs(line,stderr)
+        }
     }
 
     private func publish() {
         guard p2_xr_session_active(session) != 0 else { return }
         guard !suspended else { p2_xr_release_input(session); return }
         if var input = spatial?.inputSnapshot() {
+            windowGesture(input)
             p2_xr_publish_input(session, &input)
         } else if let pad = controller?.extendedGamepad {
             var input = P2XRInput()
@@ -55,6 +76,7 @@ final class PortalController {
             input.move_x = pad.leftThumbstick.xAxis.value
             input.move_y = pad.leftThumbstick.yAxis.value
             input.turn_x = pad.rightThumbstick.xAxis.value
+            input.look_y = pad.rightThumbstick.yAxis.value
             input.blue_trigger = pad.rightTrigger.value
             input.orange_trigger = pad.leftTrigger.value
             if pad.buttonA.isPressed { input.buttons |= UInt32(P2_XR_JUMP.rawValue) }
@@ -62,8 +84,23 @@ final class PortalController {
             if pad.buttonX.isPressed { input.buttons |= UInt32(P2_XR_USE.rawValue) }
             if pad.buttonMenu.isPressed { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
             if pad.leftThumbstickButton?.isPressed == true { input.buttons |= UInt32(P2_XR_RECENTER.rawValue) }
+            if pad.leftThumbstickButton?.isPressed == true && pad.rightThumbstickButton?.isPressed == true {
+                input.buttons |= UInt32(P2_XR_WINDOW.rawValue)
+                input.buttons &= ~UInt32(P2_XR_RECENTER.rawValue)
+            }
+            windowGesture(input)
             p2_xr_publish_input(session, &input)
         } else { p2_xr_release_input(session) }
+    }
+
+    private func windowGesture(_ input: P2XRInput) {
+        if input.buttons & UInt32(P2_XR_WINDOW.rawValue) != 0 {
+            if windowHold == nil { windowHold = Date() }
+            if !requestedWindow, let windowHold, Date().timeIntervalSince(windowHold) >= 0.8 {
+                requestedWindow = true
+                NotificationCenter.default.post(name: .portalRequestWindow,object: nil)
+            }
+        } else { windowHold = nil; requestedWindow = false }
     }
 
     static func releaseAll() {

@@ -94,6 +94,35 @@ muted unless `--audio` is passed. See its printed path for `Documents/game.log`.
 The optional RenderView hook is a hash-checked, pass-through layout audit; it
 does not change the camera or enable stereo.
 
+For a **synthetic simulator input** and frame-timing check on an owned map:
+
+```sh
+python3 tools/run_visionos_game.py --sim VISION_PRO_SIMULATOR_UDID --map sp_a2_laser_intro --input-audit --frame-audit
+```
+
+This leaves `Documents/launch.args` intact. It stops injecting input if a real
+controller connects. The audit is disabled on device builds and does not
+establish physical DualSense or PSVR2 Sense support. `--stereo-audit` separately
+requests a fixed-separation diagnostic pair without a tracked headset pose.
+Follow the [acceptance order](docs/acceptance.md) before immersive testing.
+The immersive development button is hidden unless `--immersive-test` is
+passed. It does not indicate that tracked gameplay or mode switching has
+passed acceptance.
+
+For a full device compile and a normal Xcode signing attempt:
+
+```sh
+python3 tools/mobile_deps.py --platform visionos --target device --jobs 3
+python3 tools/build_visionos_game.py --target device --opt 2 --jobs 3
+xcodebuild -project visionos/Portal2AVP.xcodeproj -scheme Portal2Game -sdk xros -destination 'generic/platform=visionOS' -derivedDataPath build/visionos/DeviceGame -allowProvisioningUpdates DEVELOPMENT_TEAM=YOUR_TEAM_ID build
+```
+
+The game target requests Apple's
+[increased memory limit](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit)
+entitlement. Provisioning requires a profile with that capability and a
+developer account in good standing. A successful device build and signature
+remain separate from installation, owned-content transfer and hardware play.
+
 For the fork's iPhone/iPad path:
 
 ```sh

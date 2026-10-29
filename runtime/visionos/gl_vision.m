@@ -36,19 +36,25 @@
 
 enum { SLOT_COUNT = 3 };
 typedef struct {
-    IOSurfaceRef storage;
-    EGLSurface surface;
+    IOSurfaceRef storage[2];
+    EGLSurface surface[2];
     unsigned leases;
     uint64_t sequence;
+    uint32_t kind;
+    uint64_t xr_session;
+    P2XRFrame render_pose;
 } SurfaceSlot;
 typedef struct {
     EGLDisplay display;
     EGLConfig config;
     EGLContext context;
     SurfaceSlot slots[SLOT_COUNT];
-    int writing, published;
+    int writing, published, eye;
     int width, height;
     uint64_t sequence;
+    uint32_t pending_kind;
+    uint64_t pending_session;
+    P2XRFrame pending_pose;
 } VisionContext;
 
 static void *gles_library, *egl_library;
@@ -101,6 +107,27 @@ int p2_vision_gl_load_library(const char *path) {
     return load_angle() ? 0 : SDL_SetError("Bundled ANGLE frameworks could not load");
 }
 void p2_vision_gl_unload_library(void) { /* Shared frameworks live for this engine lifetime. */ }
+int p2_vision_gl_set_attribute(SDL_GLattr attribute, int value) {
+    int supported = 0;
+    switch (attribute) {
+    case SDL_GL_RED_SIZE: case SDL_GL_GREEN_SIZE: case SDL_GL_BLUE_SIZE: case SDL_GL_ALPHA_SIZE:
+        supported = value >= 0 && value <= 8; break;
+    case SDL_GL_BUFFER_SIZE: supported = value >= 0 && value <= 32; break;
+    case SDL_GL_DEPTH_SIZE: supported = value >= 0 && value <= 24; break;
+    case SDL_GL_STENCIL_SIZE: supported = value >= 0 && value <= 8; break;
+    case SDL_GL_DOUBLEBUFFER: supported = value == 0 || value == 1; break;
+    case SDL_GL_ACCELERATED_VISUAL: supported = value == 1 || value == -1; break;
+    // The guest sees gl4es' desktop compatibility API, over native ES 3.
+    case SDL_GL_CONTEXT_MAJOR_VERSION: supported = value >= 1 && value <= 2; break;
+    case SDL_GL_CONTEXT_MINOR_VERSION: supported = value >= 0 && value <= 1; break;
+    case SDL_GL_CONTEXT_PROFILE_MASK: supported = value == 0 || value == SDL_GL_CONTEXT_PROFILE_COMPATIBILITY; break;
+    case SDL_GL_CONTEXT_FLAGS: case SDL_GL_SHARE_WITH_CURRENT_CONTEXT:
+    case SDL_GL_MULTISAMPLEBUFFERS: case SDL_GL_MULTISAMPLESAMPLES:
+    case SDL_GL_FRAMEBUFFER_SRGB_CAPABLE: supported = value == 0; break;
+    default: break;
+    }
+    return supported ? 0 : SDL_SetError("Unsupported visionOS GL attribute %d=%d",attribute,value);
+}
 
 static IOSurfaceRef new_storage(int width, int height) {
     NSDictionary *properties = @{
@@ -112,21 +139,24 @@ static IOSurfaceRef new_storage(int width, int height) {
     return IOSurfaceCreate((__bridge CFDictionaryRef)properties);
 }
 static void free_slots(VisionContext *context, SurfaceSlot *slots) {
-    for (int i = 0; i < SLOT_COUNT; ++i) {
-        if (slots[i].surface) destroy_surface(context->display,slots[i].surface);
-        if (slots[i].storage) CFRelease(slots[i].storage);
-    }
+    for (int i = 0; i < SLOT_COUNT; ++i)
+        for (int eye = 0; eye < 2; ++eye) {
+            if (slots[i].surface[eye]) destroy_surface(context->display,slots[i].surface[eye]);
+            if (slots[i].storage[eye]) CFRelease(slots[i].storage[eye]);
+        }
 }
 static int new_slots(VisionContext *context, int width, int height, SurfaceSlot *slots) {
     const EGLint attributes[] = {EGL_WIDTH,width,EGL_HEIGHT,height,
         EGL_IOSURFACE_PLANE_ANGLE,0,EGL_TEXTURE_TARGET,EGL_TEXTURE_2D,EGL_TEXTURE_FORMAT,EGL_TEXTURE_RGBA,
         EGL_TEXTURE_TYPE_ANGLE,GL_UNSIGNED_BYTE,EGL_TEXTURE_INTERNAL_FORMAT_ANGLE,GL_BGRA_EXT,EGL_NONE};
     for (int i = 0; i < SLOT_COUNT; ++i) {
-        slots[i].storage = new_storage(width,height);
-        if (!slots[i].storage) return 0;
-        slots[i].surface = create_client_surface(context->display,EGL_IOSURFACE_ANGLE,
-            (EGLClientBuffer)slots[i].storage,context->config,attributes);
-        if (!slots[i].surface) return 0;
+        for (int eye = 0; eye < 2; ++eye) {
+            slots[i].storage[eye] = new_storage(width,height);
+            if (!slots[i].storage[eye]) return 0;
+            slots[i].surface[eye] = create_client_surface(context->display,EGL_IOSURFACE_ANGLE,
+                (EGLClientBuffer)slots[i].storage[eye],context->config,attributes);
+            if (!slots[i].surface[eye]) return 0;
+        }
     }
     return 1;
 }
@@ -157,7 +187,7 @@ SDL_GLContext p2_vision_gl_create_context(int width, int height) {
     context->context = create_context(context->display, context->config, EGL_NO_CONTEXT, context_attributes);
     if (!context->context) goto fail;
     if (!new_slots(context,width,height,context->slots)) goto fail;
-    if (!make_current(context->display, context->slots[0].surface, context->slots[0].surface, context->context)) goto fail;
+    if (!make_current(context->display, context->slots[0].surface[0], context->slots[0].surface[0], context->context)) goto fail;
     pthread_mutex_lock(&lock); host = context; pthread_mutex_unlock(&lock);
     fprintf(stderr, "[gl-vision] Native ANGLE/Metal IOSurface pool created (%dx%d, %d slots)\n", width, height, SLOT_COUNT);
     return context;
@@ -173,7 +203,7 @@ int p2_vision_gl_make_current(SDL_Window *window, SDL_GLContext opaque) {
     (void)window;
     VisionContext *context = opaque;
     if (!context) return host && make_current(host->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) ? 0 : -1;
-    EGLSurface surface = context->slots[context->writing].surface;
+    EGLSurface surface = context->slots[context->writing].surface[context->eye];
     return make_current(context->display, surface, surface, context->context) ? 0 : -1;
 }
 int p2_vision_gl_swap_interval(int interval) { (void)interval; return 0; }
@@ -201,7 +231,7 @@ int p2_vision_gl_resize(int width, int height) {
         if (!leases) break;
         pthread_cond_wait(&available,&lock);
     }
-    if (!make_current(context->display,replacement[0].surface,replacement[0].surface,context->context)) {
+    if (!make_current(context->display,replacement[0].surface[0],replacement[0].surface[0],context->context)) {
         context->published = published;
         pthread_mutex_unlock(&lock);
         free_slots(context,replacement);
@@ -209,11 +239,86 @@ int p2_vision_gl_resize(int width, int height) {
     }
     memcpy(previous,context->slots,sizeof(previous));
     memcpy(context->slots,replacement,sizeof(replacement));
-    context->width = width; context->height = height; context->writing = 0;
+    context->width = width; context->height = height; context->writing = 0; context->eye = 0;
+    context->pending_kind = 0;
     pthread_mutex_unlock(&lock);
     free_slots(context,previous);
     fprintf(stderr,"[gl-vision] Resized native IOSurface pool to %dx%d\n",width,height);
     return 0;
+}
+int p2_vision_gl_select_eye(uint32_t eye) {
+    VisionContext *context = host;
+    if (!context || eye >= 2) return -1;
+    finish();
+    EGLSurface surface = context->slots[context->writing].surface[eye];
+    if (!make_current(context->display,surface,surface,context->context)) return -1;
+    context->eye = (int)eye;
+    return 0;
+}
+int p2_vision_gl_capture_target(uint32_t eye) {
+    if (!host || eye > 1) return -1;
+    static void (*get_integer)(GLenum,GLint *);
+    static void (*bind_framebuffer)(GLenum,GLuint);
+    static void (*blit)(GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLbitfield,GLenum);
+    static GLenum (*error)(void);
+    if (!get_integer) {
+        get_integer = dlsym(gles_library,"glGetIntegerv");
+        bind_framebuffer = dlsym(gles_library,"glBindFramebuffer");
+        blit = dlsym(gles_library,"glBlitFramebuffer");
+        error = dlsym(gles_library,"glGetError");
+    }
+    if (!get_integer || !bind_framebuffer || !blit || !error) return -1;
+    GLint draw = 0, read = 0;
+    get_integer(GL_DRAW_FRAMEBUFFER_BINDING,&draw);
+    get_integer(GL_READ_FRAMEBUFFER_BINDING,&read);
+    GLenum before = error(), result = GL_NO_ERROR;
+    if (draw) {
+        // Source may finish RenderView in its multisampled screen target;
+        // its normal final present happens later. Resolve each eye now.
+        bind_framebuffer(GL_READ_FRAMEBUFFER,(GLuint)draw);
+        bind_framebuffer(GL_DRAW_FRAMEBUFFER,0);
+        blit(0,0,host->width,host->height,0,0,host->width,host->height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        result = error();
+        bind_framebuffer(GL_READ_FRAMEBUFFER,(GLuint)read);
+        bind_framebuffer(GL_DRAW_FRAMEBUFFER,(GLuint)draw);
+    }
+    static unsigned traces;
+    if (++traces <= 6 || result != GL_NO_ERROR)
+        fprintf(stderr,"[gl-vision] Eye %u final target draw=%d read=%d prior_error=%#x resolve_error=%#x\n",eye,draw,read,before,result);
+    return result == GL_NO_ERROR ? 0 : -1;
+}
+int p2_vision_gl_mark_stereo(uint64_t session, const P2XRFrame *pose, int diagnostic) {
+    VisionContext *context = host;
+    if (!context || (!diagnostic && (!pose || !pose->tracked || !p2_xr_session_active(session)))) return 0;
+    context->pending_kind = diagnostic ? P2_VISION_DIAGNOSTIC_STEREO : P2_VISION_TRACKED_STEREO;
+    context->pending_session = diagnostic ? 0 : session;
+    memset(&context->pending_pose,0,sizeof(context->pending_pose));
+    if (!diagnostic) context->pending_pose = *pose;
+    return 1;
+}
+static void audit_timing(uint64_t sequence) {
+    static int enabled = -1;
+    static uint64_t start, previous, frames, last_sequence;
+    static double maximum_ms;
+    if (enabled < 0) {
+        const char *value = getenv("P2_VISION_FRAME_AUDIT");
+        enabled = value && !strcmp(value,"1");
+    }
+    if (!enabled) return;
+    uint64_t now = SDL_GetPerformanceCounter();
+    double frequency = (double)SDL_GetPerformanceFrequency();
+    if (!start) { start = previous = now; last_sequence = sequence; return; }
+    double gap = (double)(now - previous) * 1000 / frequency;
+    if (gap > maximum_ms) maximum_ms = gap;
+    previous = now;
+    ++frames;
+    double seconds = (double)(now - start) / frequency;
+    if (seconds >= 5) {
+        fprintf(stderr,"[vision-frame-audit] sequence=%llu delta=%llu frames=%llu seconds=%.3f fps=%.2f max_gap_ms=%.2f\n",
+            (unsigned long long)sequence,(unsigned long long)(sequence-last_sequence),
+            (unsigned long long)frames,seconds,frames/seconds,maximum_ms);
+        start = now; frames = 0; maximum_ms = 0; last_sequence = sequence;
+    }
 }
 void p2_vision_gl_present(void) {
     VisionContext *context = host;
@@ -221,6 +326,12 @@ void p2_vision_gl_present(void) {
     finish(); // Producer GPU writes must finish before another Metal queue samples the storage.
     pthread_mutex_lock(&lock);
     context->slots[context->writing].sequence = ++context->sequence;
+    SurfaceSlot *completed = &context->slots[context->writing];
+    completed->kind = context->pending_kind ? context->pending_kind : P2_VISION_MONO;
+    completed->xr_session = context->pending_session;
+    completed->render_pose = context->pending_pose;
+    context->pending_kind = 0; context->pending_session = 0;
+    memset(&context->pending_pose,0,sizeof(context->pending_pose));
     context->published = context->writing;
     int next = -1;
     while (next < 0) {
@@ -229,10 +340,12 @@ void p2_vision_gl_present(void) {
         if (next < 0) pthread_cond_wait(&available, &lock);
     }
     context->writing = next;
+    context->eye = 0;
     pthread_mutex_unlock(&lock);
-    EGLSurface surface = context->slots[next].surface;
+    EGLSurface surface = context->slots[next].surface[0];
     if (!make_current(context->display, surface, surface, context->context))
         fprintf(stderr, "[gl-vision] Could not switch producer slot: EGL error %#x\n", get_error());
+    audit_timing(context->sequence);
 }
 int p2_vision_gl_acquire(P2VisionGLFrame *frame) {
     if (!frame) return 0;
@@ -242,8 +355,10 @@ int p2_vision_gl_acquire(P2VisionGLFrame *frame) {
     if (ready) {
         SurfaceSlot *slot = &host->slots[host->published];
         ++slot->leases;
-        *frame = (P2VisionGLFrame){slot->sequence, (uint32_t)host->width, (uint32_t)host->height,
-            (void *)slot->storage, host->published};
+        *frame = (P2VisionGLFrame){.sequence=slot->sequence,.width=(uint32_t)host->width,.height=(uint32_t)host->height,
+            .surface=(void *)slot->storage[0],.right_surface=(void *)slot->storage[1],
+            .eye_count=slot->kind == P2_VISION_MONO ? 1 : 2,.kind=slot->kind,
+            .xr_session=slot->xr_session,.render_pose=slot->render_pose,.slot=host->published};
     }
     pthread_mutex_unlock(&lock);
     return ready;

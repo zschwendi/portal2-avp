@@ -45,32 +45,41 @@ def main():
                '-I' + str(prefix / 'include/SDL2'),'-I' + str(prefix / 'include/gl4es'),
                '-I' + str(prefix / 'include/freetype2')]
     generated = [*base,'-O' + args.opt,'-gline-tables-only',*build_game.WARNINGS,'-DRT_FAST_MEMORY','-Iruntime']
-    units = [(str(p), runtime) for p in sorted(Path('runtime').glob('*.c'))]
-    units += [(str(Path('runtime/ios') / name), runtime) for name in
-              ('essl3.c','srgb.c','case_path.c','fontconfig_min.c','steam_stub.c','steam_stub_generated.c')]
-    units += [('runtime/ios/gl_ios.m',runtime + ['-fobjc-arc'])]
-    units += [(str(p), runtime + (['-fobjc-arc'] if p.suffix == '.m' else []))
-              for p in sorted(Path('runtime/visionos').glob('*')) if p.suffix in ('.c','.m')]
-    units.append(('src/main.c',runtime + ['-Dmain=p2_main']))
+    generated_units = []
     if not args.runtime_only:
         layout = Path('build/game/prep/layout.json')
         data = json.loads(layout.read_text())
         manifest, _ = build_game.generate(SimpleNamespace(layout=layout,all=True,jobs=args.jobs), data, build_game.roots(data))
         source = Path('build/game/gen/src')
-        units += [(str(source / name),generated) for name in sorted(manifest['shards'])]
-        units.append((str(source / 'dispatch.c'),generated))
+        generated_units += [(str(source / name),generated) for name in sorted(manifest['shards'])]
+        generated_units.append((str(source / 'dispatch.c'),generated))
         plugins, _ = build_game.generate_plugins(Path('config/local.json'))
-        units += [(str(p),generated) for p in plugins]
+        generated_units += [(str(p),generated) for p in plugins]
     identity = subprocess.check_output(['clang','--version'],text=True)
     out = ROOT / 'build/visionos' / (('runtime-audit-' if args.runtime_only else 'game-') + args.target)
     out.mkdir(parents=True,exist_ok=True)
-    print(f'Compiling {len(units)} units for {triple}, runtime_only={args.runtime_only}',flush=True)
-    objects, count, cpu = build_game.compile_units(units,out/'obj',args.jobs,identity)
+    print(f'Compiling {len(generated_units)} generated units for {triple}, runtime_only={args.runtime_only}',flush=True)
+    game_objects, count, cpu = build_game.compile_units(generated_units,out/'obj',args.jobs,identity)
+    # Plan host sources after the long generated-code phase. This captures
+    # host edits/new units made during that phase instead of attaching a stale
+    # source-cache key to code read by clang much later.
+    units = [(str(p), runtime) for p in sorted(Path('runtime').glob('*.c'))]
+    units += [(str(Path('runtime/ios') / name), runtime) for name in
+              ('essl3.c','srgb.c','case_path.c','fontconfig_min.c','game_state.c','steam_stub.c','steam_stub_generated.c')]
+    units += [('runtime/ios/gl_ios.m',runtime + ['-fobjc-arc'])]
+    units += [(str(p), runtime + (['-fobjc-arc'] if p.suffix == '.m' else []))
+              for p in sorted(Path('runtime/visionos').glob('*')) if p.suffix in ('.c','.m')]
+    units.append(('src/main.c',runtime + ['-Dmain=p2_main']))
+    print(f'Compiling {len(units)} current host/runtime units',flush=True)
+    runtime_objects, runtime_count, runtime_cpu = build_game.compile_units(units,out/'obj',args.jobs,identity)
+    objects = runtime_objects + game_objects
+    count += runtime_count
+    cpu += runtime_cpu
     archive = out / ('libportal2-runtime.a' if args.runtime_only else 'libportal2-game.a')
     response = out / ('runtime-objects.txt' if args.runtime_only else 'game-objects.txt')
     response.write_text('\n'.join(str(p) for p in objects) + '\n')
     subprocess.run(['xcrun','libtool','-static','-o',str(archive),'-filelist',str(response)],check=True)
-    result = dict(target=triple,runtime_only=args.runtime_only,compiled=count,units=len(units),cpu_seconds=cpu,
+    result = dict(target=triple,runtime_only=args.runtime_only,compiled=count,units=len(units)+len(generated_units),cpu_seconds=cpu,
                   archive=str(archive),generated_game_included=not args.runtime_only)
     (out / ('runtime-receipt.json' if args.runtime_only else 'game-receipt.json')).write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2),flush=True)

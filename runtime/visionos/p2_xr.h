@@ -8,13 +8,13 @@ extern "C" {
 #endif
 
 #define P2_XR_EYE_COUNT 2u
-#define P2_XR_ABI_VERSION 2u
+#define P2_XR_ABI_VERSION 4u
 #define P2_XR_UNITS_PER_METER 39.37007874015748f
 
 enum P2XRButtons {
     P2_XR_JUMP = 1u << 0, P2_XR_CROUCH = 1u << 1,
     P2_XR_USE = 1u << 2, P2_XR_PAUSE = 1u << 3,
-    P2_XR_RECENTER = 1u << 4
+    P2_XR_RECENTER = 1u << 4, P2_XR_WINDOW = 1u << 5
 };
 
 typedef struct {
@@ -43,7 +43,7 @@ typedef struct {
 } P2XRFrame;
 
 typedef struct {
-    float move_x, move_y, turn_x;
+    float move_x, move_y, turn_x, look_y;
     float blue_trigger, orange_trigger;
     uint32_t buttons;
     uint32_t connected;

@@ -35,6 +35,7 @@ int p2_vision_game_start(void) {
             if (freopen(log.fileSystemRepresentation, "w", stderr)) {
                 dup2(fileno(stderr), STDOUT_FILENO);
                 setvbuf(stderr, NULL, _IONBF, 0);
+                setvbuf(stdout, NULL, _IONBF, 0);
             }
             struct rlimit limits;
             if (!getrlimit(RLIMIT_NOFILE, &limits)) {
@@ -56,6 +57,23 @@ int p2_vision_game_start(void) {
                 @"-w", @"1280", @"-h", @"720", @"+mat_queue_mode", @"0", @"+fps_max", @"60"] mutableCopy];
             NSString *extra = [NSString stringWithContentsOfFile:[documents stringByAppendingPathComponent:@"launch.args"]
                                                        encoding:NSUTF8StringEncoding error:nil];
+#if TARGET_OS_SIMULATOR
+            const char *input_audit = getenv("P2_VISION_INPUT_AUDIT");
+            if (input_audit && !strcmp(input_audit,"1")) [arguments addObject:@"-condebug"];
+            const char *test_map = getenv("P2_VISION_TEST_MAP");
+            if (test_map && *test_map) {
+                NSString *map = [NSString stringWithUTF8String:test_map];
+                NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                    @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
+                NSString *path = [documents stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"game/portal2/maps/%@.bsp",map]];
+                if ([map rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound &&
+                    [files fileExistsAtPath:path]) {
+                    [arguments addObjectsFromArray:@[@"+map",map]];
+                    extra = nil; // Development override never changes the player's launch file.
+                }
+            }
+#endif
             for (NSString *line in [extra componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
                 if (line.length && ![line hasPrefix:@"#"]) [arguments addObject:line];
             int argc = (int)arguments.count;

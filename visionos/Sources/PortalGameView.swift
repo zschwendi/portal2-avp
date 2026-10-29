@@ -7,24 +7,41 @@ import SwiftUI
 
 struct PortalGameView: View {
     @Environment(\.scenePhase) private var phase
+    @Environment(\.openImmersiveSpace) private var openSpace
+    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissImmersiveSpace) private var dismissSpace
+    @State private var opening = false
     @State private var status = "Native engine test. Immersive stereo integration is still in progress."
     @State private var started = false
     @State private var controlsSession: UInt64 = 0
     @State private var spatial: (any PortalSpatialSource)?
+    @State private var aspect = 16.0 / 9.0
     var body: some View {
         VStack(spacing: 12) {
             HStack {
                 Text("Portal 2 — engine test").font(.headline)
                 Spacer()
                 Button("Run engine test") { start() }.disabled(started)
+                if ProcessInfo.processInfo.arguments.contains("--immersive-test") {
+                    Button("Enter immersive") { Task { await enterImmersive() } }.disabled(!started || opening)
+                }
             }
-            PortalGameSurface().aspectRatio(16 / 9, contentMode: .fit)
+            PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
             Text(status).font(.caption).foregroundStyle(.secondary)
+            Text("Hold both stick buttons to return to the window. L3 alone recenters.")
+                .font(.caption).foregroundStyle(.secondary)
         }.padding(20)
         .handlesGameControllerEvents(matching: .gamepad)
         .task {
+            let dismiss = dismissSpace, open = openWindow
+            PortalGameFlow.shared.configure {
+                await dismiss()
+                open(id: "game-window")
+            }
             prepareControls()
-            if ProcessInfo.processInfo.arguments.contains("--engine-test") { start() }
+            if p2_vision_game_state() == 1 { started = true; status = "The native engine is running." }
+            else if ProcessInfo.processInfo.arguments.contains("--engine-test") { start() }
         }
         .onChange(of: phase) { _, value in
             PortalController.suspend(session: controlsSession,value != .active)
@@ -35,8 +52,24 @@ struct PortalGameView: View {
             p2_xr_end_session(controlsSession)
         }
     }
+    @MainActor private func enterImmersive() async {
+        opening = true
+        defer { opening = false }
+        switch await openSpace(id: "game-world") {
+        case .opened:
+            PortalGameFlow.shared.immersive = true
+            dismissWindow(id: "game-window")
+        case .userCancelled: status = "Opening immersive play was cancelled."
+        case .error: status = "The immersive space could not open."
+        @unknown default: status = "The system returned an unknown result."
+        }
+    }
     @MainActor private func prepareControls() {
         guard controlsSession == 0 else { return }
+        guard p2_xr_abi_version() == P2_XR_ABI_VERSION else {
+            status = "The native input library needs rebuilding."
+            return
+        }
         controlsSession = p2_xr_begin_window_session()
         if #available(visionOS 26.0, *) {
             let source = PortalSenseTracking(session: ARKitSession(),world: WorldTrackingProvider(),trackPoses: false)
@@ -46,17 +79,26 @@ struct PortalGameView: View {
         PortalController.attach(session: controlsSession,spatial: spatial)
     }
     private func start() {
+        guard p2_xr_abi_version() == P2_XR_ABI_VERSION else {
+            status = "The native input library needs rebuilding."
+            return
+        }
         if p2_vision_game_start() < 0 {
             status = "Game files are missing. Install your Portal 2 content and prepared Linux files first."
         } else {
             started = true
-            status = "Starting the recompiled game. This window tests the engine; it is not immersive stereo."
+            if ProcessInfo.processInfo.environment["P2_VISION_STEREO_AUDIT"] == "1" {
+                status = "Stereo renderer audit: fixed eye separation, no tracked headset pose."
+            } else {
+                status = "Starting the recompiled game. This window tests the engine; it is not immersive stereo."
+            }
         }
     }
 }
 
 private struct PortalGameSurface: UIViewRepresentable {
-    func makeCoordinator() -> PortalGameSurfaceRenderer { PortalGameSurfaceRenderer() }
+    let onAspect: @MainActor @Sendable (Double) -> Void
+    func makeCoordinator() -> PortalGameSurfaceRenderer { PortalGameSurfaceRenderer(onAspect: onAspect) }
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.colorPixelFormat = .bgra8Unorm_srgb
@@ -73,7 +115,11 @@ private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
     private var reported = false
+    private var aspect = 0.0
+    private let onAspect: @MainActor @Sendable (Double) -> Void
+    init(onAspect: @escaping @MainActor @Sendable (Double) -> Void) { self.onAspect = onAspect }
     @MainActor func configure(_ view: MTKView) {
+        guard p2_xr_abi_version() == P2_XR_ABI_VERSION else { return }
         guard let device = view.device, let library = device.makeDefaultLibrary() else { return }
         queue = device.makeCommandQueue()
         let descriptor = MTLRenderPipelineDescriptor()
@@ -89,7 +135,17 @@ private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
               let command = queue?.makeCommandBuffer() else { return }
         var frame = P2VisionGLFrame()
         let leased = p2_vision_gl_acquire(&frame) != 0
+        if leased && frame.height > 0 {
+            let eyes = frame.kind == P2_VISION_DIAGNOSTIC_STEREO.rawValue ? 2.0 : 1.0
+            let next = Double(frame.width) * eyes / Double(frame.height)
+            if abs(next - aspect) > 0.001 {
+                aspect = next
+                let onAspect = self.onAspect
+                Task { @MainActor in onAspect(next) }
+            }
+        }
         var texture: MTLTexture?
+        var rightTexture: MTLTexture?
         if leased, let pointer = frame.surface {
             let surface = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb,
@@ -97,15 +153,23 @@ private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
             descriptor.usage = .shaderRead
             descriptor.storageMode = .shared
             texture = view.device?.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
+            if frame.kind == P2_VISION_DIAGNOSTIC_STEREO.rawValue, let pointer = frame.right_surface {
+                let right = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
+                rightTexture = view.device?.makeTexture(descriptor: descriptor,iosurface: right,plane: 0)
+            }
         }
         if let encoder = command.makeRenderCommandEncoder(descriptor: pass) {
             if let texture, let pipeline {
                 encoder.setRenderPipelineState(pipeline)
                 encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentTexture(rightTexture ?? texture,index: 1)
+                var paired: UInt32 = rightTexture == nil ? 0 : 1
+                encoder.setFragmentBytes(&paired,length: MemoryLayout<UInt32>.size,index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 if !reported {
                     reported = true
                     NSLog("[vision-game] Actual engine texture submitted: sequence=%llu %ux%u", frame.sequence, frame.width, frame.height)
+                    Task { @MainActor in PortalController.reportControllers() }
                 }
             }
             encoder.endEncoding()

@@ -900,6 +900,18 @@ void rt_ios_gl_swap_window(SDL_Window *window) {
 }
 #else
 void *rt_ios_gl_current_context(void) { return p2_vision_gl_current_context(); }
+int p2_vision_gl_begin_eye(uint32_t eye) {
+    gl4es_pre_swap();
+    int result = p2_vision_gl_select_eye(eye);
+    gl4es_post_swap();
+    return result;
+}
+int p2_vision_gl_end_eye(uint32_t eye) {
+    gl4es_pre_swap();
+    int result = p2_vision_gl_capture_target(eye);
+    gl4es_post_swap();
+    return result;
+}
 void *rt_ios_gl_share_group(void *context) { return p2_vision_gl_share_group(context); }
 SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
     SDL_GetWindowSize(window, &drawable_width, &drawable_height);

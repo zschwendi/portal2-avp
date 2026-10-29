@@ -5,7 +5,11 @@ import CompositorServices
 struct Portal2AVPApp: App {
     var body: some Scene {
         #if P2_GAME
-        WindowGroup { PortalGameView() }.defaultSize(width: 1000, height: 680)
+        WindowGroup(id: "game-window") { PortalGameView() }.defaultSize(width: 1000, height: 680)
+        ImmersiveSpace(id: "game-world") {
+            CompositorLayer(configuration: PortalLayerConfiguration()) { layer in PortalRenderer.start(layer: layer) }
+        }
+            .immersionStyle(selection: .constant(.full),in: .full)
         #else
         WindowGroup(id: "setup") {
             RendererCheckView()
@@ -80,4 +84,5 @@ private struct RendererCheckView: View {
 
 extension Notification.Name {
     static let portalRendererStopped = Notification.Name("Portal2RendererStopped")
+    static let portalRequestWindow = Notification.Name("Portal2RequestWindow")
 }

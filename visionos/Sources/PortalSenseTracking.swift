@@ -100,6 +100,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
         guard present else { return nil }
         var input = P2XRInput()
         input.spatial = 1
+        var leftClick = false, rightClick = false
         for (accessory, controller) in bindings {
             let profile = controller.input
             let stick = profile.dpads[.thumbstick]
@@ -107,6 +108,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
             let grip = profile.buttons[.grip]?.pressedInput.isPressed == true
             switch accessory.inherentChirality {
             case .left:
+                leftClick = profile.buttons[.thumbstickButton]?.pressedInput.isPressed == true
                 input.move_x = stick?.xAxis.value ?? 0
                 input.move_y = stick?.yAxis.value ?? 0
                 input.orange_trigger = trigger
@@ -114,8 +116,10 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
                 if profile.buttons[.a]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_USE.rawValue) }
                 if profile.buttons[.b]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
             case .right:
+                rightClick = profile.buttons[.thumbstickButton]?.pressedInput.isPressed == true
                 input.connected = 1
                 input.turn_x = stick?.xAxis.value ?? 0
+                input.look_y = stick?.yAxis.value ?? 0
                 input.blue_trigger = trigger
                 if profile.buttons[.a]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_JUMP.rawValue) }
                 if profile.buttons[.b]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
@@ -123,6 +127,10 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
             }
             if grip { input.buttons |= UInt32(P2_XR_USE.rawValue) }
             if profile.buttons[.menu]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
+        }
+        if leftClick && rightClick {
+            input.buttons |= UInt32(P2_XR_WINDOW.rawValue)
+            input.buttons &= ~UInt32(P2_XR_RECENTER.rawValue)
         }
         return input
     }
