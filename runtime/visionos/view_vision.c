@@ -51,6 +51,11 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     uint64_t session = p2_xr_read_latest(&pose,&controls);
     int diagnostic = !session && stereo_audit;
     if ((!session && !diagnostic) || rendering) return 0;
+    int width = 0, height = 0;
+    int32_t setup_width, setup_height;
+    p2_vision_gl_drawable_size(&width,&height);
+    memcpy(&setup_width,view+16,4); memcpy(&setup_height,view+24,4);
+    if (setup_width != width || setup_height != height) return 0;
     rt_ios_game_state_poll();
     if (rt_ios_game_ui_visible() || view[32]) return 0;
     if (session && (controls.buttons & P2_XR_RECENTER) && !(previous_buttons & P2_XR_RECENTER)) aligned_session = 0;
@@ -76,7 +81,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
         memcpy(GPTR(eye_hud[eye]),hud,sizeof(hud));
         P2XRSourceView source = {.origin=origin,.angles=angles};
         if (session) {
-            if (!p2_xr_source_view(&pose,eye,source_from_tracking,&source)) { rendering = 0; return 0; }
+            if (!p2_xr_source_view(&pose,eye,source_from_tracking,&source)) goto mono;
         } else {
             float pitch=angles.x*(float)M_PI/180, yaw=angles.y*(float)M_PI/180, roll=angles.z*(float)M_PI/180;
             vector_float3 right = {-sinf(roll)*sinf(pitch)*cosf(yaw)+cosf(roll)*sinf(yaw),
@@ -89,7 +94,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
             put_vector(setup,112,source.origin); put_vector(setup,124,source.angles);
             if (session) {
                 float x = source.projection.columns[0].x, y = source.projection.columns[1].y;
-                if (!(x > 0 && y > 0)) { rendering = 0; return 0; }
+                if (!(x > 0 && y > 0)) goto mono;
                 float fov = 2 * atanf(1/x) * 180 / (float)M_PI;
                 put_float(setup,104,fov); put_float(setup,108,fov); put_float(setup,152,y/x);
                 put_float(setup,240,1 + source.projection.columns[2].y/2);
@@ -100,20 +105,25 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
                 put_float(setup,136,2); put_float(setup,144,2);
             }
         }
-        if (p2_vision_gl_begin_eye(eye)) { rendering = 0; return 0; }
+        if (p2_vision_gl_begin_eye(eye)) goto mono;
         uint32_t args[5]; memcpy(args,original_args,sizeof(args));
         args[1] = eye_views[eye]; args[2] = eye_hud[eye];
         c->eax = rt_invoke(c,original,args,5);
-        if (p2_vision_gl_end_eye(eye)) { rendering = 0; return 0; }
+        if (p2_vision_gl_end_eye(eye)) goto mono;
     }
-    // Keep the right eye current: the game's normal swap flushes gl4es' main
-    // FBO there. Switching back now would overwrite the captured left eye.
+    // Keep the right eye current: togl's normal Present writes there after
+    // the captured left image is complete. Mono fallback must restore eye 0.
     int marked = p2_vision_gl_mark_stereo(session,session ? &pose : NULL,diagnostic);
+    if (!marked) goto mono;
     rendering = 0;
     if (marked && ++stereo_frames <= 3)
         fprintf(stderr,"[vision-view] Stereo pair #%u rendered: session=%llu pose=%llu diagnostic=%d; physical gameplay unverified\n",
             stereo_frames,(unsigned long long)session,(unsigned long long)(session ? pose.sequence : 0),diagnostic);
     return marked;
+mono:
+    rendering = 0;
+    p2_vision_gl_begin_eye(0);
+    return 0;
 }
 
 static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }

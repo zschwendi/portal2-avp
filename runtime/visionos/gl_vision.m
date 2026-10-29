@@ -256,35 +256,56 @@ int p2_vision_gl_select_eye(uint32_t eye) {
     return 0;
 }
 int p2_vision_gl_capture_target(uint32_t eye) {
-    if (!host || eye > 1) return -1;
+    if (!host || eye > 1 || host->eye != (int)eye || !get_current ||
+        get_current() != host->context) return -1;
     static void (*get_integer)(GLenum,GLint *);
     static void (*bind_framebuffer)(GLenum,GLuint);
     static void (*blit)(GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLbitfield,GLenum);
     static GLenum (*error)(void);
+    static GLboolean (*is_enabled)(GLenum);
+    static void (*disable)(GLenum), (*enable)(GLenum);
     if (!get_integer) {
         get_integer = dlsym(gles_library,"glGetIntegerv");
         bind_framebuffer = dlsym(gles_library,"glBindFramebuffer");
         blit = dlsym(gles_library,"glBlitFramebuffer");
         error = dlsym(gles_library,"glGetError");
+        is_enabled = dlsym(gles_library,"glIsEnabled");
+        disable = dlsym(gles_library,"glDisable"); enable = dlsym(gles_library,"glEnable");
     }
-    if (!get_integer || !bind_framebuffer || !blit || !error) return -1;
-    GLint draw = 0, read = 0;
+    if (!get_integer || !bind_framebuffer || !blit || !error || !is_enabled || !disable || !enable) return -1;
+    GLenum before = GL_NO_ERROR;
+    unsigned prior_errors = 0;
+    for (; prior_errors < 16; ++prior_errors) {
+        GLenum pending = error();
+        if (pending == GL_NO_ERROR) break;
+        if (before == GL_NO_ERROR) before = pending;
+    }
+    if (prior_errors == 16) return -1;
+    GLint draw = 0, read = 0, samples = 0;
     get_integer(GL_DRAW_FRAMEBUFFER_BINDING,&draw);
     get_integer(GL_READ_FRAMEBUFFER_BINDING,&read);
-    GLenum before = error(), result = GL_NO_ERROR;
+    get_integer(GL_SAMPLES,&samples);
+    GLboolean scissor = is_enabled(GL_SCISSOR_TEST);
+    GLenum result = error();
+    if (result != GL_NO_ERROR) return -1;
     if (draw) {
-        // Source may finish RenderView in its multisampled screen target;
-        // its normal final present happens later. Resolve each eye now.
+        // Source finishes RenderView in an engine-owned FBO. Its normal
+        // final Present happens later; capture each eye before it is reused.
+        // Blits obey native scissor state. Restore it without changing the
+        // gl4es/togl caches, which still hold the original enabled state.
+        if (scissor) disable(GL_SCISSOR_TEST);
         bind_framebuffer(GL_READ_FRAMEBUFFER,(GLuint)draw);
         bind_framebuffer(GL_DRAW_FRAMEBUFFER,0);
         blit(0,0,host->width,host->height,0,0,host->width,host->height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
         result = error();
         bind_framebuffer(GL_READ_FRAMEBUFFER,(GLuint)read);
         bind_framebuffer(GL_DRAW_FRAMEBUFFER,(GLuint)draw);
+        if (scissor) enable(GL_SCISSOR_TEST);
     }
     static unsigned traces;
     if (++traces <= 6 || result != GL_NO_ERROR)
-        fprintf(stderr,"[gl-vision] Eye %u final target draw=%d read=%d prior_error=%#x resolve_error=%#x\n",eye,draw,read,before,result);
+        fprintf(stderr,"[gl-vision] Eye %u target draw=%d read=%d samples=%d scissor=%u prior_error=%#x prior_count=%u capture_error=%#x\n",
+            eye,draw,read,samples,scissor,before,prior_errors,result);
     return result == GL_NO_ERROR ? 0 : -1;
 }
 int p2_vision_gl_mark_stereo(uint64_t session, const P2XRFrame *pose, int diagnostic) {
@@ -323,6 +344,11 @@ static void audit_timing(uint64_t sequence) {
 void p2_vision_gl_present(void) {
     VisionContext *context = host;
     if (!context) return;
+    if (!get_current || get_current() != context->context) {
+        static unsigned wrong_context;
+        if (++wrong_context <= 3) fprintf(stderr,"[gl-vision] Refused publication without the producer context\n");
+        return;
+    }
     finish(); // Producer GPU writes must finish before another Metal queue samples the storage.
     pthread_mutex_lock(&lock);
     context->slots[context->writing].sequence = ++context->sequence;

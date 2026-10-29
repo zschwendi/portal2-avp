@@ -78,6 +78,93 @@ static int input_route(void) {
     return valid;
 }
 
+static int check_pair(const unsigned char expected[2][4]) {
+    P2VisionGLFrame frame;
+    if (!p2_vision_gl_acquire(&frame)) return 0;
+    int valid = frame.eye_count == 2 && frame.kind == P2_VISION_DIAGNOSTIC_STEREO &&
+        !frame.xr_session && !frame.render_pose.tracked && frame.surface && frame.right_surface &&
+        frame.surface != frame.right_surface;
+    for (unsigned eye=0; valid && eye<2; ++eye) {
+        IOSurfaceRef surface = (IOSurfaceRef)(eye ? frame.right_surface : frame.surface);
+        IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL);
+        unsigned char *base = IOSurfaceGetBaseAddress(surface);
+        size_t stride = IOSurfaceGetBytesPerRow(surface);
+        for (unsigned corner=0; corner<4; ++corner) {
+            unsigned x = corner&1 ? frame.width-1 : 0, y = corner&2 ? frame.height-1 : 0;
+            unsigned char *pixel = base + y*stride + x*4;
+            for (unsigned channel=0; channel<4; ++channel)
+                valid = valid && abs((int)pixel[channel]-expected[eye][channel]) <= 2;
+        }
+        fprintf(stderr,"[P2-GL-PROBE] captured eye=%u BGRA=%u,%u,%u,%u corners=%s\n",
+            eye,base[0],base[1],base[2],base[3],valid ? "PASS" : "FAIL");
+        IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL);
+    }
+    p2_vision_gl_release(frame.slot);
+    return valid;
+}
+
+static int owned_target(SDL_Window *window,SDL_GLContext context) {
+    void (*gen_fb)(int,unsigned *) = rt_host_gl_symbol(NULL,"glGenFramebuffers");
+    void (*bind_fb)(unsigned,unsigned) = rt_host_gl_symbol(NULL,"glBindFramebuffer");
+    void (*delete_fb)(int,const unsigned *) = rt_host_gl_symbol(NULL,"glDeleteFramebuffers");
+    void (*gen_tex)(int,unsigned *) = rt_host_gl_symbol(NULL,"glGenTextures");
+    void (*bind_tex)(unsigned,unsigned) = rt_host_gl_symbol(NULL,"glBindTexture");
+    void (*delete_tex)(int,const unsigned *) = rt_host_gl_symbol(NULL,"glDeleteTextures");
+    void (*image)(unsigned,int,int,int,int,int,unsigned,unsigned,const void *) = rt_host_gl_symbol(NULL,"glTexImage2D");
+    void (*parameter)(unsigned,unsigned,int) = rt_host_gl_symbol(NULL,"glTexParameteri");
+    void (*attach)(unsigned,unsigned,unsigned,unsigned,int) = rt_host_gl_symbol(NULL,"glFramebufferTexture2D");
+    unsigned (*status)(unsigned) = rt_host_gl_symbol(NULL,"glCheckFramebufferStatus");
+    void (*clear_color)(float,float,float,float) = rt_host_gl_symbol(NULL,"glClearColor");
+    void (*clear)(unsigned) = rt_host_gl_symbol(NULL,"glClear");
+    void (*enable)(unsigned) = rt_host_gl_symbol(NULL,"glEnable");
+    void (*disable)(unsigned) = rt_host_gl_symbol(NULL,"glDisable");
+    unsigned char (*is_enabled)(unsigned) = rt_host_gl_symbol(NULL,"glIsEnabled");
+    void (*scissor)(int,int,int,int) = rt_host_gl_symbol(NULL,"glScissor");
+    void (*blit)(int,int,int,int,int,int,int,int,unsigned,unsigned) = rt_host_gl_symbol(NULL,"glBlitFramebuffer");
+    if (!gen_fb || !bind_fb || !delete_fb || !gen_tex || !bind_tex || !delete_tex || !image ||
+        !parameter || !attach || !status || !clear_color || !clear || !enable || !disable ||
+        !is_enabled || !scissor || !blit) return 0;
+    unsigned framebuffer=0,texture=0;
+    gen_tex(1,&texture); bind_tex(0x0de1,texture);
+    parameter(0x0de1,0x2801,0x2600); parameter(0x0de1,0x2800,0x2600);
+    image(0x0de1,0,0x1908,160,120,0,0x1908,0x1401,NULL);
+    gen_fb(1,&framebuffer); bind_fb(0x8d40,framebuffer);
+    attach(0x8d40,0x8ce0,0x0de1,texture,0);
+    int valid = status(0x8d40) == 0x8cd5;
+    for (unsigned eye=0; valid && eye<2; ++eye) {
+        valid = !p2_vision_gl_begin_eye(eye);
+        bind_fb(0x8d40,framebuffer);
+        disable(0x0c11);
+        clear_color(eye ? 0.1f : 0.9f,eye ? 0.8f : 0.2f,eye ? 0.3f : 0.1f,1);
+        clear(0x4000);
+        // A tiny scissor must not crop the full eye capture. Its enabled
+        // state must survive so gl4es/togl state caches remain correct.
+        enable(0x0c11); scissor(8,9,20,21);
+        valid = !p2_vision_gl_end_eye(eye) && is_enabled(0x0c11) && valid;
+    }
+    disable(0x0c11);
+    // Emulate togl's later Present through the real gl4es read/draw path.
+    bind_fb(0x8ca8,framebuffer); bind_fb(0x8ca9,0);
+    blit(0,0,160,120,0,0,160,120,0x4000,0x2600);
+    valid = p2_vision_gl_mark_stereo(0,NULL,1) && valid;
+    rt_ios_gl_swap_window(window);
+    const unsigned char expected[2][4] = {{26,51,230,255},{76,204,26,255}};
+    valid = check_pair(expected) && valid;
+    bind_fb(0x8d40,0); delete_fb(1,&framebuffer); bind_tex(0x0de1,0); delete_tex(1,&texture);
+    P2VisionGLFrame before,after;
+    if (p2_vision_gl_acquire(&before)) p2_vision_gl_release(before.slot); else return 0;
+    valid = !p2_vision_gl_make_current(window,NULL) && valid;
+    valid = p2_vision_gl_capture_target(0) == -1 && valid;
+    p2_vision_gl_present();
+    if (p2_vision_gl_acquire(&after)) {
+        valid = after.sequence == before.sequence && valid;
+        p2_vision_gl_release(after.slot);
+    } else valid = 0;
+    valid = !p2_vision_gl_make_current(window,context) && valid;
+    fprintf(stderr,"[P2-GL-PROBE] %s: engine-owned FBO capture, scissor restoration, Present parity and missing-context rejection\n",valid ? "PASS" : "FAIL");
+    return valid;
+}
+
 int main(void) {
     @autoreleasepool {
         setenv("SDL_VIDEODRIVER", "dummy", 1);
@@ -152,6 +239,7 @@ int main(void) {
             IOSurfaceUnlock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceUnlock(right,kIOSurfaceLockReadOnly,NULL);
             p2_vision_gl_release(pair.slot);
         } else valid = 0;
+        valid = owned_target(window,context) && valid;
         p2_vision_gl_delete_context(context);
         valid = input_route() && valid;
         SDL_DestroyWindow(window); SDL_Quit();
