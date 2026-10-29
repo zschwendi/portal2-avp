@@ -27,6 +27,9 @@ targets:
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
           - ProfileName: SpatialGamepad
+        NSLocalNetworkUsageDescription: Import your Portal 2 game files from your Mac.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.zschwendi.portal2avp.enginetest

@@ -123,6 +123,52 @@ entitlement. Provisioning requires a profile with that capability and a
 developer account in good standing. A successful device build and signature
 remain separate from installation, owned-content transfer and hardware play.
 
+### Headset content import
+
+The engine-test app includes a developer importer for the owned files in
+`config/local.json`. It copies files onto the headset; the Mac does not render
+or stream the game. Prepare the Linux images with `tools/gameprep.py` first.
+On the Mac, start a temporary source with its private LAN address and hostname:
+
+```sh
+python3 tools/serve_owned_content.py --bind YOUR_MAC_LAN_IP --advertise-host YOUR_MAC.local --ttl 7200 --output build/visionos/content-source.json
+```
+
+The command hashes the prepared images, Linux depot and supported game-content
+directories. It writes a private receipt containing a temporary manifest URL;
+keep that URL private. The source exports a fixed file map, offers no directory
+listing or writes, and stops after the selected lifetime. Leave it running
+during import. `build/visionos/content-source.activity.json` reports transfer
+counts without including the URL.
+
+Install the signed `Portal2Game.app` with Xcode or `devicectl`. To launch this
+development app with the receipt, substitute the exact physical headset UDID
+below. This restarts only the engine-test app, preserving its Documents/saves:
+
+```sh
+python3 - PHYSICAL_HEADSET_UDID <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+source = json.loads(Path('build/visionos/content-source.json').read_text())
+subprocess.run([
+    'xcrun', 'devicectl', 'device', 'process', 'launch',
+    '--device', sys.argv[1], '--terminate-existing',
+    'dev.zschwendi.portal2avp.enginetest', '--',
+    '--import-content', source['manifest_url'], '--engine-test',
+], check=True)
+PY
+```
+
+Keep the headset awake and allow its Local Network prompt. The window shows
+file and byte progress and starts the engine only after import succeeds.
+Existing matching files are reused after SHA-256 verification; different
+files are preserved under `Documents/Portal2 Import Backups`. Saves in
+`portal2-userdata` are outside the import allowlist. A failed import keeps
+completed files; relaunch with a current receipt to retry. A partially
+downloaded file starts again. There is no general game library/import UI yet.
+The protocol and Swift importer pass fixture tests; physical import throughput
+and gameplay remain separate acceptance steps.
+
 For the fork's iPhone/iPad path:
 
 ```sh

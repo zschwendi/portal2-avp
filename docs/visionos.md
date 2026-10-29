@@ -104,10 +104,19 @@ accepted gameplay and the Mac test has been stopped. Vision Pro is the target.
   Vision Pro is established by these results.
 - Immersive entry is opt-in through `--immersive-test` during development.
   The normal candidate opens windowed so controller acceptance can come first.
+- The engine-test app can import owned content directly from a temporary
+  local Mac source, then start the native engine. It verifies file sizes and
+  SHA-256, reuses matching files and preserves replaced files and saves.
+  Protocol and real Swift fixture tests cover import, reuse, failures and
+  unsafe-path rejection. See the [headset import instructions](../AVP-INSTALL.md#headset-content-import).
+- Device automatic signing now succeeds, including the increased-memory
+  entitlement. Deployment and physical gameplay remain separate gates.
 
-Current Python/native suite: 47 tests pass, including UBSan XR math/session
+Current Python/native suite: 50 tests pass, including UBSan XR math/session
 checks. Native runtime: 59 source units compile with warnings treated as
-errors. The offscreen GPU/SDL input probe passes. These are component checks,
+errors. The offscreen GPU/SDL input probe passes, including capture from an
+engine-owned framebuffer with scissoring enabled and rejection of capture or
+publication without the correct current context. These are component checks,
 not campaign, stereo, device or performance acceptance.
 Focused guest SDL handle/refcount and restart checks also pass AddressSanitizer
 and UBSan. The broader native ABI run currently fails an existing SDL event

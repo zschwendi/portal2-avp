@@ -10,6 +10,7 @@ No headset gameplay, multiplayer, Workshop or campaign-completion claim is made.
 
 - [visionOS status, research, implementation path](docs/visionos.md)
 - [Build and verify the renderer check](AVP-INSTALL.md)
+- [Import owned content onto a headset](AVP-INSTALL.md#headset-content-import)
 - [Windowed-first acceptance and controller priorities](docs/acceptance.md)
 - Prerequisite report: `python3 tools/visionos.py --preflight`
 - Native XR tests: `python3 -m unittest discover -s tests -p test_visionos_xr.py -v`

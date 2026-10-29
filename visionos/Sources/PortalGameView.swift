@@ -17,18 +17,25 @@ struct PortalGameView: View {
     @State private var controlsSession: UInt64 = 0
     @State private var spatial: (any PortalSpatialSource)?
     @State private var aspect = 16.0 / 9.0
+    @StateObject private var importer = PortalContentImporter()
+    @State private var importing = false
+    @State private var importFailed = false
     var body: some View {
         VStack(spacing: 12) {
             HStack {
                 Text("Portal 2 — engine test").font(.headline)
                 Spacer()
-                Button("Run engine test") { start() }.disabled(started)
+                Button("Run engine test") { start() }.disabled(started || importing || importFailed)
                 if ProcessInfo.processInfo.arguments.contains("--immersive-test") {
                     Button("Enter immersive") { Task { await enterImmersive() } }.disabled(!started || opening)
                 }
             }
             PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
             Text(status).font(.caption).foregroundStyle(.secondary)
+            if importing {
+                ProgressView(value: Double(importer.completedBytes), total: Double(max(importer.totalBytes,1)))
+                Text(importer.status).font(.caption).foregroundStyle(.secondary)
+            }
             Text("Hold both stick buttons to return to the window. L3 alone recenters.")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(20)
@@ -40,6 +47,27 @@ struct PortalGameView: View {
                 open(id: "game-window")
             }
             prepareControls()
+            if p2_vision_game_state() == 0 || p2_vision_game_state() == -1 {
+                let arguments = ProcessInfo.processInfo.arguments
+                if let index = arguments.firstIndex(of: "--import-content"), index+1 < arguments.count,
+                   let url = URL(string: arguments[index+1]) {
+                    importing = true
+                    status = "Importing your Portal 2 files from your Mac."
+                    do {
+                        let documents = FileManager.default.urls(for: .documentDirectory,in: .userDomainMask)[0]
+                        try await importer.run(manifestURL: url,documents: documents)
+                        importing = false
+                        status = "Game files imported."
+                    } catch {
+                        let error = error as NSError
+                        fputs("[vision-import] Failed: domain=\(error.domain) code=\(error.code)\n",stderr)
+                        importing = false
+                        importFailed = true
+                        status = "Import stopped. Keep your Mac and headset connected, then reopen to retry."
+                        return
+                    }
+                }
+            }
             if p2_vision_game_state() == 1 { started = true; status = "The native engine is running." }
             else if ProcessInfo.processInfo.arguments.contains("--engine-test") { start() }
         }
