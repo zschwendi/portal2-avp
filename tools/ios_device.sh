@@ -41,11 +41,17 @@ install)
   ;;
 data)
   # Sans la bande son ni sdk_content (inutiles au jeu) : ~11,5 Go.
+  # La liste des fichiers copiés (noms et tailles, runtime/content_check.h) est
+  # relevée avant la copie et copiée en dernier : le jeu vérifie chaque fichier
+  # listé avant de démarrer (une copie interrompue reste incomplète).
+  mkdir -p build/ios/device
+  python3 tools/serve_owned_content.py --write-content-manifest build/ios/device/portal2-content-manifest.txt
   copy_to $APP_ID build/game/prep Documents/prep
   copy_to $APP_ID "$LINUX_ROOT" Documents/linux
   for d in bin platform update portal2 portal2_dlc1 portal2_dlc2; do
     [ -e "$GAME_ROOT/$d" ] && copy_to $APP_ID "$GAME_ROOT/$d" "Documents/game/$d"
   done
+  copy_to $APP_ID build/ios/device/portal2-content-manifest.txt Documents/portal2-content-manifest.txt
   ;;
 run)
   shift

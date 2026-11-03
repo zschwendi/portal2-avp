@@ -223,6 +223,14 @@ void rt_foreign_thread_detach(void){
     pthread_setspecific(foreign_key,NULL);
     foreign_release(t);
 }
+// Nonzero while a guest worker is still running or a host thread is still
+// attached: rt_destroy then leaves the runtime mapped (the process is
+// exiting) instead of aborting here. Read without the guest lock: a late
+// change only falls back to the checks in rt_threads_destroy.
+int rt_threads_busy(void) {
+    for(Thread *t=threads;t;t=t->next) if(t->foreign||(!t->joined&&!t->finished)) return 1;
+    return 0;
+}
 void rt_threads_destroy(void) {
     // Refuse to unmap a CPU or TLS while a native worker can still access it.
     for(Thread *t=threads;t;t=t->next){

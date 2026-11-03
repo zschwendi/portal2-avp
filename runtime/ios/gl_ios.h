@@ -10,7 +10,12 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <SDL.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_VISION
+#include "../visionos/sdl_vision.h"
+#else
 #include "sdl_ios.h"   // tailles en pixels pour le jeu
+#endif
 
 typedef void *CGLContextObj;
 typedef void *CGLShareGroupObj;

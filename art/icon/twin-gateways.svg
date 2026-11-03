@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<!-- Twin Gateways: vector reference of the main geometry, written by art/icon/generate_icon.swift.
+     Original procedural geometry only: perspective panel wall, two elliptical openings, glows.
+     The shipped PNGs are the per-pixel renders; this file is for review. -->
+<defs>
+  <radialGradient id="deep" cx="560.00" cy="470.00" r="760.00" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#0D1F4C"/><stop offset="1" stop-color="#02040C"/>
+  </radialGradient>
+  <linearGradient id="wall" x1="0" y1="0" x2="1024" y2="640" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#D3DAE3"/><stop offset="0.55" stop-color="#A6ADBA"/><stop offset="1" stop-color="#474D5B"/>
+  </linearGradient>
+  <filter id="halo" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="22"/></filter>
+  <filter id="band" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#wall)"/>
+<g id="seams" stroke="#5C6573" stroke-width="2" stroke-opacity="0.55" fill="none">
+  <line x1="48.11" y1="0" x2="48.11" y2="1024"/>
+  <line x1="348.51" y1="0" x2="348.51" y2="1024"/>
+  <line x1="576.61" y1="0" x2="576.61" y2="1024"/>
+  <line x1="755.72" y1="0" x2="755.72" y2="1024"/>
+  <line x1="900.07" y1="0" x2="900.07" y2="1024"/>
+  <line x1="1018.90" y1="0" x2="1018.90" y2="1024"/>
+  <line x1="-0.00" y1="2530.01" x2="1024.00" y2="1589.99"/>
+  <line x1="-0.00" y1="2206.11" x2="1024.00" y2="1413.89"/>
+  <line x1="-0.00" y1="1882.21" x2="1024.00" y2="1237.79"/>
+  <line x1="-0.00" y1="1558.31" x2="1024.00" y2="1061.69"/>
+  <line x1="-0.00" y1="1234.41" x2="1024.00" y2="885.59"/>
+  <line x1="-0.00" y1="910.51" x2="1024.00" y2="709.49"/>
+  <line x1="-0.00" y1="586.60" x2="1024.00" y2="533.40"/>
+  <line x1="-0.00" y1="262.70" x2="1024.00" y2="357.30"/>
+  <line x1="-0.00" y1="-61.20" x2="1024.00" y2="181.20"/>
+  <line x1="-0.00" y1="-385.10" x2="1024.00" y2="5.10"/>
+  <line x1="-0.00" y1="-709.00" x2="1024.00" y2="-171.00"/>
+</g>
+<g id="cyan-opening">
+  <ellipse cx="293.03" cy="582.64" rx="141.97" ry="241.75" transform="rotate(1.745 293.03 582.64)" fill="url(#deep)"/>
+  <ellipse cx="293.03" cy="582.64" rx="141.97" ry="241.75" transform="rotate(1.745 293.03 582.64)" fill="none" stroke="#1690FF" stroke-width="67.23" stroke-opacity="0.55" filter="url(#halo)"/>
+  <ellipse cx="293.03" cy="582.64" rx="141.97" ry="241.75" transform="rotate(1.745 293.03 582.64)" fill="none" stroke="#2CC6FF" stroke-width="17.93" filter="url(#band)"/>
+  <ellipse cx="293.03" cy="582.64" rx="141.97" ry="241.75" transform="rotate(1.745 293.03 582.64)" fill="none" stroke="#E9FBFF" stroke-width="4.48"/>
+</g>
+<g id="amber-opening">
+  <ellipse cx="777.99" cy="419.21" rx="80.40" ry="181.73" transform="rotate(-0.483 777.99 419.21)" fill="url(#deep)"/>
+  <ellipse cx="777.99" cy="419.21" rx="80.40" ry="181.73" transform="rotate(-0.483 777.99 419.21)" fill="none" stroke="#FF5A0A" stroke-width="50.63" stroke-opacity="0.55" filter="url(#halo)"/>
+  <ellipse cx="777.99" cy="419.21" rx="80.40" ry="181.73" transform="rotate(-0.483 777.99 419.21)" fill="none" stroke="#FFA11F" stroke-width="13.50" filter="url(#band)"/>
+  <ellipse cx="777.99" cy="419.21" rx="80.40" ry="181.73" transform="rotate(-0.483 777.99 419.21)" fill="none" stroke="#FFF6E6" stroke-width="3.38"/>
+</g>
+</svg>

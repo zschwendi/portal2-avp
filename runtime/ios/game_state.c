@@ -17,6 +17,7 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #include <SDL.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,9 +26,11 @@
 
 static uint32_t engine_vgui;      // objet IEngineVGui invité (0 : pas encore)
 static int ui_visible = 1;        // menus au démarrage
+static _Atomic int ui_visible_shared = 1;   // même valeur, lisible hors du thread du jeu (visionOS)
 static uint64_t next_query, next_lookup;
 
 int rt_ios_game_ui_visible(void) { return ui_visible; }
+int rt_ios_game_ui_visible_shared(void) { return atomic_load_explicit(&ui_visible_shared, memory_order_relaxed); }
 
 // ---- Courbe de réponse du déplacement au joystick ------------------------
 // La configuration Xbox du jeu (cfg/joy_configuration.cfg, config.cfg) règle
@@ -129,25 +132,26 @@ static void update_move_response(CPU *c) {
 // du serveur (setpos…) passe par « cmd », qui l'envoie comme un joueur.
 static char pending_command[256];
 void rt_ios_console_command(const char *line) { snprintf(pending_command, sizeof(pending_command), "%s", line); }
-static void run_console_command(CPU *c, const char *line) {
+// 1 : commande trouvée et appelée ; 0 : rien fait.
+static int run_console_command(CPU *c, const char *line) {
     enum { ARGV = 64, LENGTH = 512, SIZE = 8 + 2 * LENGTH + 4 * ARGV };
     char name[64] = {0};
     sscanf(line, "%63s", name);
-    if (!name[0] || strlen(line) >= LENGTH) return;
+    if (!name[0] || strlen(line) >= LENGTH) return 0;
     if (!icvar) find_convar(c, "joy_response_move");   // initialise icvar
-    if (icvar <= 1) return;
+    if (icvar <= 1) return 0;
     uint32_t text = guest_text(name);
-    if (!text) return;
+    if (!text) return 0;
     uint32_t args[2] = {icvar, text};
     uint32_t base = rt_invoke(c, R32(R32(icvar) + 13 * 4), args, 2);
     rt_free(text);
     if (!plausible(base) || !plausible(R32(base + 12)) || strcmp(GPTR(R32(base + 12)), name)) {
-        fprintf(stderr, "[ios] commande %s introuvable\n", name); return;
+        fprintf(stderr, "[ios] commande %s introuvable\n", name); return 0;
     }
     uint32_t callback = R32(base + 24); uint8_t bits = *(uint8_t *)GPTR(base + 32);
-    if (!plausible(callback) || (bits & 4)) { fprintf(stderr, "[ios] commande %s : rappel inattendu\n", name); return; }
+    if (!plausible(callback) || (bits & 4)) { fprintf(stderr, "[ios] commande %s : rappel inattendu\n", name); return 0; }
     uint32_t command = rt_alloc(SIZE);
-    if (!command) return;
+    if (!command) return 0;
     memset(GPTR(command), 0, SIZE);
     char *full = GPTR(command + 8), *argv = GPTR(command + 8 + LENGTH);
     snprintf(full, LENGTH, "%s", line);
@@ -164,7 +168,20 @@ static void run_console_command(CPU *c, const char *line) {
     fprintf(stderr, "[ios] commande %s\n", line);
     if (bits & 2) rt_invoke(c, callback, &command, 1); else rt_invoke(c, callback, NULL, 0);
     rt_free(command);
+    return 1;
 }
+#if TARGET_OS_VISION
+// visionOS : exécutée tout de suite, sur le CPU du shim SDL_PollEvent en cours
+// (le thread principal du moteur, sa pile et son identité), jamais sur un
+// thread étranger rattaché : le système de matériaux vérifie le thread
+// principal. Seule la pompe d'événements du moteur l'appelle (sdl_vision.c :
+// changement de mode vidéo de la vue immersive), jamais RenderView. Hors shim,
+// rien n'est exécuté. 1 si la commande a été trouvée et appelée.
+int rt_ios_console_command_now(const char *line) {
+    CPU *c = rt_shim_cpu();
+    return c ? run_console_command(c, line) : 0;
+}
+#endif
 // P2_IOS_AUTOEXEC="var=valeur;commande args;pause 2;…" : exécuté 5 s après la
 // première entrée en partie (banc : sv_cheats=1;cmd setpos …;cmd setang …) ;
 // « pause N » attend N secondes avant la suite.
@@ -218,6 +235,7 @@ void rt_ios_game_state_poll(void) {
     int visible = (rt_invoke(c, method, &engine_vgui, 1) & 0xff) != 0;
     if (visible != ui_visible) fprintf(stderr, "[ios] interface du jeu %s\n", visible ? "affichée" : "masquée");
     ui_visible = visible;
+    atomic_store_explicit(&ui_visible_shared, visible, memory_order_relaxed);
     if (linear_wanted || saved_response[0]) update_move_response(c);
     if (pending_command[0]) { char line[256]; snprintf(line, sizeof(line), "%s", pending_command); pending_command[0] = 0; run_console_command(c, line); }
     autoexec(c);

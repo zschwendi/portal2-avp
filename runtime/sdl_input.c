@@ -13,7 +13,9 @@
 #include "sdl_common.h"
 #include <SDL2/SDL.h>
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_VISION
+#include "visionos/sdl_vision.h"
+#elif TARGET_OS_IPHONE
 #include "ios/sdl_ios.h"   // coordonnées en pixels pour le jeu
 #endif
 #include <stddef.h>
@@ -240,8 +242,18 @@ static int watch_trampoline(void *opaque, SDL_Event *event) {
 // ---- Handles comptés (joysticks, contrôleurs, haptique) ------------------
 // SDL compte les ouvertures d'un même périphérique et rend le même pointeur ;
 // le handle invité est libéré quand la dernière ouverture invitée est fermée.
-typedef struct Ref { void *host; uint32_t kind, handle, refs; struct Ref *next; } Ref;
+typedef struct Ref { void *host; uint32_t kind, handle, refs; SDL_JoystickID instance; struct Ref *next; } Ref;
 static Ref *refs;
+static void ref_drop(Ref *r);
+
+// SDL_Quit can free devices regardless of outstanding native/guest opens.
+// Compare instance IDs through SDL's live lists before dereferencing a cached
+// pointer; malloc may reuse the address for a different controller later.
+static int ref_live(const Ref *r) {
+    if (r->kind == KIND_JOYSTICK) return SDL_JoystickFromInstanceID(r->instance) == r->host;
+    if (r->kind == KIND_CONTROLLER) return SDL_GameControllerFromInstanceID(r->instance) == r->host;
+    return 1;
+}
 
 static Ref *ref_find(uint32_t handle, uint32_t kind) {
     for (Ref *r = refs; r; r = r->next) if (r->handle == handle && r->kind == kind) return r;
@@ -249,12 +261,17 @@ static Ref *ref_find(uint32_t handle, uint32_t kind) {
 }
 static uint32_t ref_acquire(CPU *c, void *host, uint32_t kind, int counted) {
     if (!host) return 0;
-    for (Ref *r = refs; r; r = r->next)
+    for (Ref *r = refs, *next; r; r = next) {
+        next = r->next;
+        if (!ref_live(r)) { ref_drop(r); continue; }
         if (r->host == host && r->kind == kind) { r->refs += (uint32_t)counted; return r->handle; }
+    }
     Ref *r = calloc(1, sizeof(*r));
     uint32_t handle = r ? rt_handle_new(host, kind) : 0;
     if (!handle) { free(r); rt_trap(c, c->eip, "SDL input handle table exhausted"); }
-    *r = (Ref){host, kind, handle, (uint32_t)counted, refs};
+    SDL_JoystickID instance = kind == KIND_JOYSTICK ? SDL_JoystickInstanceID(host) :
+        kind == KIND_CONTROLLER ? SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(host)) : -1;
+    *r = (Ref){.host=host,.kind=kind,.handle=handle,.refs=(uint32_t)counted,.instance=instance,.next=refs};
     refs = r;
     return handle;
 }
@@ -263,6 +280,8 @@ static void *ref_host(CPU *c, uint32_t handle, uint32_t kind) {
     if (!handle) return NULL;
     void *host = rt_handle_get(handle, kind);
     if (!host) rt_trap(c, c->eip, "invalid SDL input handle");
+    Ref *r = ref_find(handle,kind);
+    if (r && !ref_live(r)) { ref_drop(r); return NULL; }
     return host;
 }
 static void ref_drop(Ref *r) {

@@ -21,7 +21,9 @@
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>UILaunchScreen</key><dict/>
-    <!-- Icône : fichiers AppIcon* tirés du jeu par tools/build_ios.py. -->
+    <!-- Icône originale (art/icon) : tools/build_ios.py compile ios/Assets.xcassets
+         avec actool et remplace ces deux clés par celles d'actool ; telles quelles,
+         elles ne servent que sans actool (PNG AppIcon* réduits par sips). -->
     <key>CFBundleIcons</key>
     <dict><key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array></dict></dict>
     <key>CFBundleIcons~ipad</key>

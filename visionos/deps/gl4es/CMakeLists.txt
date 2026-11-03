@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.24)
+project(Portal2MobileGL LANGUAGES C)
+if(NOT EXISTS "${P2_GL4ES_SOURCE}/CMakeLists.txt")
+    message(FATAL_ERROR "Pass P2_GL4ES_SOURCE pointing to the pinned gl4es checkout")
+endif()
+set(STATICLIB ON CACHE BOOL "" FORCE)
+set(NOX11 ON CACHE BOOL "" FORCE)
+set(NOEGL ON CACHE BOOL "" FORCE)
+set(NO_LOADER ON CACHE BOOL "" FORCE)
+set(NO_GBM ON CACHE BOOL "" FORCE)
+set(DEFAULT_ES 2 CACHE STRING "" FORCE)
+add_subdirectory("${P2_GL4ES_SOURCE}" gl4es)
+# Keep each platform's archive in its own build tree. Upstream's default is
+# source/lib, which can silently copy an archive from the previous SDK build.
+set_target_properties(GL PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/out")

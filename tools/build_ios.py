@@ -14,6 +14,7 @@ obtenu par Xcode pour un appareil (ios/signing).
 import argparse
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -100,7 +101,7 @@ def main():
     (app / 'Info.plist').write_text(plist)
     # Page du jeu dans l'app Réglages d'iOS (lue par runtime/ios/settings.c).
     shutil.copytree(ROOT / 'ios/Settings.bundle', app / 'Settings.bundle', dirs_exist_ok=True)
-    app_icon(app)
+    app_icon(app, target['sdk'])
     # Lancement depuis l'écran d'accueil : arguments du jeu par défaut (les
     # dossiers de données sont ajoutés par ios/main_ios.c).
     # La langue vient de tools/language.py au moment du build : pour la changer,
@@ -115,24 +116,52 @@ def main():
     print(f'{app} : exécutable {size / 1e6:.0f} Mo, {time.time() - started:.0f} s au total')
 
 
-def app_icon(app):
-    """Icône de l'app tirée de l'icône macOS du jeu (portal2/resource/game.icns) :
-    une image de Valve, prise dans la copie du joueur au lieu d'être versionnée.
-    Fichiers à l'ancienne (CFBundleIconFiles d'ios/Info.plist.in), sans
-    catalogue d'images. Sans le fichier : icône par défaut d'iOS."""
-    config = json.loads(Path('config/local.json').read_text()) if Path('config/local.json').exists() else {}
-    icns = Path(config.get('game_root', '')) / 'portal2/resource/game.icns'
-    if not icns.is_file():
-        print(f'icône : {icns} absent, icône par défaut')
-        return
+def app_icon(app, platform):
+    """Icône originale de l'app (art/icon/generate_icon.swift, voir
+    art/icon/PROVENANCE.md) : le catalogue ios/Assets.xcassets est compilé par
+    actool dans l'app (Assets.car et AppIcon*.png), puis les clés CFBundleIcons
+    et CFBundleIcons~ipad de sa plist partielle remplacent celles
+    d'ios/Info.plist.in. Sans actool : PNG à l'ancienne réduits par sips, pour
+    les CFBundleIconFiles d'ios/Info.plist.in."""
+    catalog = ROOT / 'ios/Assets.xcassets'
     work = app.parent / 'icon'
     shutil.rmtree(work, ignore_errors=True)
-    subprocess.run(['iconutil', '-c', 'iconset', '-o', str(work / 'game.iconset'), str(icns)], check=True)
-    largest = max((work / 'game.iconset').glob('icon_*.png'), key=lambda p: p.stat().st_size)
+    work.mkdir(parents=True)
+    for old in app.glob('AppIcon*.png'):   # icônes d'un build précédent
+        old.unlink()
+    partial = work / 'partial-info.plist'
+    command = ['xcrun', 'actool', str(catalog), '--compile', str(app), '--platform', platform,
+               '--minimum-deployment-target', '17.0', '--app-icon', 'AppIcon',
+               '--target-device', 'iphone', '--target-device', 'ipad',
+               '--output-partial-info-plist', str(partial),
+               '--output-format', 'human-readable-text', '--errors', '--warnings']
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        report = (result.stdout + result.stderr).strip()
+        compiled = result.returncode == 0 and partial.is_file() and (app / 'Assets.car').is_file()
+    except FileNotFoundError as error:
+        report, compiled = str(error), False
+    if compiled:
+        if '.warnings */' in report or '.errors */' in report:   # sections de la sortie d'actool
+            print(f'icône : {report}')
+        merge_partial_plist(app / 'Info.plist', partial)
+        return
+    print(f'icône : actool indisponible ou en échec, PNG réduits par sips\n{report}')
+    source = catalog / 'AppIcon.appiconset/AppIcon.png'
     for name, size in (('AppIcon60x60@2x.png', 120), ('AppIcon60x60@3x.png', 180), ('AppIcon76x76@2x~ipad.png', 152),
                        ('AppIcon83.5x83.5@2x~ipad.png', 167)):
-        subprocess.run(['sips', '-z', str(size), str(size), str(largest), '--out', str(app / name)],
+        subprocess.run(['sips', '-z', str(size), str(size), str(source), '--out', str(app / name)],
                        check=True, capture_output=True)
+
+
+def merge_partial_plist(info, partial):
+    """Reporte dans Info.plist les clés de premier niveau d'une plist partielle d'actool."""
+    with open(info, 'rb') as f:
+        data = plistlib.load(f)
+    with open(partial, 'rb') as f:
+        data.update(plistlib.load(f))
+    with open(info, 'wb') as f:
+        plistlib.dump(data, f)
 
 
 if __name__ == '__main__':

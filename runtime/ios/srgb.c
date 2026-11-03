@@ -22,7 +22,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_VISION
+#include <GLES3/gl3.h>
+#else
 #include <OpenGLES/ES3/gl.h>
+#endif
 
 void *gl4es_GetProcAddress(const char *name);
 
