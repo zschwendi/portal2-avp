@@ -1,0 +1,21 @@
+{
+  "generator" : "art/icon/generate_icon.swift",
+  "canvas_px" : 1024,
+  "camera" : { "focal_px" : 1000.00, "wall_yaw_deg" : 30.00, "distance" : 1.00, "principal_px" : [512.0, 470.0] },
+  "wall" : { "panel" : 0.2500, "grid_origin" : [0.0775, -0.0900], "seam_width" : 0.0034, "albedo" : "#D3DAE3", "ambient" : "#F2F5FA", "fog" : "#161D2C", "key_light_uv" : [-0.6200, 0.4200], "key_radius" : 0.700, "tone_jitter" : 0.070 },
+  "deep_field" : { "inner" : "#0D1F4C", "outer" : "#02040C", "centre_px" : [560.0, 470.0], "radius_px" : 760.0, "star_seed" : "0x5EED2B1C0DE5", "star_count" : 230,
+    "wisps" : [
+      { "centre_px" : [300.0, 430.0], "sigma_px" : [150.0, 60.0], "rotation_deg" : -28.0, "colour" : "#2C3C9E", "intensity" : 0.120 },
+      { "centre_px" : [380.0, 640.0], "sigma_px" : [170.0, 70.0], "rotation_deg" : 18.0, "colour" : "#16708F", "intensity" : 0.110 },
+      { "centre_px" : [760.0, 420.0], "sigma_px" : [120.0, 50.0], "rotation_deg" : 35.0, "colour" : "#0F5E86", "intensity" : 0.120 },
+      { "centre_px" : [820.0, 600.0], "sigma_px" : [140.0, 55.0], "rotation_deg" : -15.0, "colour" : "#3A2E86", "intensity" : 0.080 },
+      { "centre_px" : [560.0, 300.0], "sigma_px" : [260.0, 80.0], "rotation_deg" : 8.0, "colour" : "#23307A", "intensity" : 0.090 }
+    ] },
+  "light" : { "core_width_px" : 3.30, "band_width_px" : 13.00, "halo_px" : [30.00, 125.00], "haze_px" : [34.00, 115.00], "spill_radii" : [0.36, 1.10], "spill_strength" : 1.00 },
+  "portals" : [
+    { "name" : "cyan", "wall_centre" : [-0.2150, -0.1000], "wall_semi_axes" : [0.1300, 0.2150], "rim" : "#2CC6FF", "glow" : "#1690FF", "core" : "#E9FBFF", "beyond" : "#FFA24A", "shimmer_phase" : 0.350,
+      "screen" : { "centre_px" : [293.03, 582.64], "radii_px" : [141.97, 241.75], "rotation_deg" : 1.745, "depth" : 0.8925 } },
+    { "name" : "amber", "wall_centre" : [0.3700, 0.0600], "wall_semi_axes" : [0.1300, 0.2150], "rim" : "#FFA11F", "glow" : "#FF5A0A", "core" : "#FFF6E6", "beyond" : "#45C8FF", "shimmer_phase" : 2.100,
+      "screen" : { "centre_px" : [777.99, 419.21], "radii_px" : [80.40, 181.73], "rotation_deg" : -0.483, "depth" : 1.1850 } }
+  ]
+}
