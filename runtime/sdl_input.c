@@ -19,6 +19,7 @@
 #include "ios/sdl_ios.h"   // coordonnées en pixels pour le jeu
 #endif
 #include <stddef.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -207,21 +208,28 @@ void rt_sdl_event_to_host(CPU *c, uint32_t guest, SDL_Event *host) {
 }
 
 // ---- Surveillance d'événements (SDL_AddEventWatch) -----------------------
-// SDL appelle les rappels de façon synchrone dans le thread qui pousse ou
-// pompe l'événement, donc pendant un shim SDL invité : on réutilise le CPU de
-// ce shim (rt_shim_cpu). Un rappel sur un thread hôte sans shim en cours
-// (thread interne SDL) n'a ni pile ni TLS invitée : il est piégé.
+// Guest SDL calls keep synchronous watch delivery on their current CPU. Native
+// GameController/keyboard threads have no guest stack or TLS. They must not wait
+// for the guest gate while SDL holds its event-watch lock (the guest may be
+// waiting for that SDL lock). Queue those notifications for the next guest pump.
 typedef struct Watch { uint32_t function, userdata; struct Watch *next; } Watch;
 static Watch *watches;
+typedef struct WatchEvent {
+    Watch *watch;
+    SDL_Event event;
+    struct WatchEvent *next;
+} WatchEvent;
+static WatchEvent *watch_head, *watch_tail;
+static size_t watch_pending;
+static pthread_mutex_t watch_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static int watch_trampoline(void *opaque, SDL_Event *event) {
-    Watch *w = opaque;
-    if (!rt_sdl_event_is_sdl2(event->type)) return 1;   // inconnu de SDL2 : invisible pour l'invité
-    CPU *c = rt_shim_cpu();
-    if (!c) {
-        fprintf(stderr, "SDL event watch %#x called on a host thread outside any guest SDL call\n", w->function);
-        abort();
-    }
+static void watch_event_free(WatchEvent *pending) {
+    if (string_event(pending->event.type)) SDL_free(pending->event.drop.file);
+    if (pending->event.type == SDL_TEXTEDITING_EXT) SDL_free(pending->event.editExt.text);
+    free(pending);
+}
+
+static int watch_invoke(CPU *c, uint32_t function, uint32_t userdata, const SDL_Event *event) {
     uint32_t saved_esp = c->esp;
     uint32_t buffer = (c->esp - 128) & ~15u;   // copie i386 sur la pile invitée
     c->esp = buffer;
@@ -230,13 +238,89 @@ static int watch_trampoline(void *opaque, SDL_Event *event) {
     if (string_event(event->type)) strings[0] = R32(buffer + I386_DROP_FILE);
     if (event->type == SDL_TEXTEDITING_EXT) strings[1] = R32(buffer + I386_EDITEXT_TEXT);
     uint32_t saved_eax = c->eax, saved_ecx = c->ecx, saved_edx = c->edx;
-    uint32_t args[2] = {w->userdata, buffer};
-    uint32_t result = rt_invoke(c, w->function, args, 2);
+    uint32_t args[2] = {userdata, buffer};
+    uint32_t result = rt_invoke(c, function, args, 2);
     c->eax = saved_eax; c->ecx = saved_ecx; c->edx = saved_edx;
     c->esp = saved_esp;
     // La chaîne reste la propriété de SDL pour un observateur : copie temporaire.
     rt_free(strings[0]); rt_free(strings[1]);
     return (int)result;
+}
+
+static int watch_trampoline(void *opaque, SDL_Event *event) {
+    Watch *w = opaque;
+    if (!rt_sdl_event_is_sdl2(event->type)) return 1;
+    CPU *c = rt_shim_cpu();
+    if (c) return watch_invoke(c, w->function, w->userdata, event);
+
+    WatchEvent *pending = calloc(1, sizeof(*pending));
+    if (!pending) { fputs("SDL event watch queue allocation failed\n", stderr); abort(); }
+    pending->watch = w;
+    pending->event = *event;
+    // SDL owns the source strings; the producer may free them before we pump.
+    char **copy = string_event(event->type) ? &pending->event.drop.file :
+                  event->type == SDL_TEXTEDITING_EXT ? &pending->event.editExt.text : NULL;
+    if (copy && *copy) {
+        *copy = SDL_strdup(*copy);
+        if (!*copy) { free(pending); fputs("SDL event watch string allocation failed\n", stderr); abort(); }
+    }
+    pthread_mutex_lock(&watch_lock);
+    if (watch_tail) watch_tail->next = pending;
+    else watch_head = pending;
+    watch_tail = pending;
+    ++watch_pending;
+    pthread_mutex_unlock(&watch_lock);
+    return 1;   // watches do not filter SDL's actual input queue
+}
+
+// Host regression tests simulate SDL-owned transient strings without pushing
+// DROP events through sdl2-compat, which does not support that synthetic path.
+#if !TARGET_OS_IPHONE
+void rt_sdl_test_native_watch(uint32_t function, uint32_t userdata, SDL_Event *event) {
+    for (Watch *w = watches; w; w = w->next)
+        if (w->function == function && w->userdata == userdata) {
+            watch_trampoline(w, event);
+            return;
+        }
+}
+#endif
+
+static void watch_drain(CPU *c) {
+    pthread_mutex_lock(&watch_lock);
+    size_t budget = watch_pending;   // ongoing producers cannot starve the input pump
+    pthread_mutex_unlock(&watch_lock);
+    while (budget--) {
+        pthread_mutex_lock(&watch_lock);
+        WatchEvent *pending = watch_head;
+        if (!pending) { pthread_mutex_unlock(&watch_lock); break; }
+        watch_head = pending->next;
+        if (!watch_head) watch_tail = NULL;
+        --watch_pending;
+        uint32_t function = pending->watch->function, userdata = pending->watch->userdata;
+        pthread_mutex_unlock(&watch_lock);
+        // No SDL/queue lock held during guest execution. The callback may remove
+        // its own watch; do not dereference pending->watch after invoking it.
+        watch_invoke(c, function, userdata, &pending->event);
+        watch_event_free(pending);
+    }
+}
+
+// Called after SDL_DelEventWatch has synchronized with native producers. Guest
+// deletion/draining is serialized by the runtime gate; cancel queued callbacks
+// before freeing their Watch, including when a callback removes itself.
+static void watch_cancel(Watch *w) {
+    pthread_mutex_lock(&watch_lock);
+    WatchEvent **link = &watch_head, *tail = NULL;
+    while (*link) {
+        WatchEvent *pending = *link;
+        if (pending->watch == w) {
+            *link = pending->next;
+            --watch_pending;
+            watch_event_free(pending);
+        } else { tail = pending; link = &pending->next; }
+    }
+    watch_tail = tail;
+    pthread_mutex_unlock(&watch_lock);
 }
 
 // ---- Handles comptés (joysticks, contrôleurs, haptique) ------------------
@@ -314,9 +398,11 @@ static uint32_t intern_name(CPU *c, const char *text) {
 
 static void poll_into(CPU *c, uint32_t guest, int *got) {
     SDL_Event event;
+    watch_drain(c);
     if (!guest) {
         // Simple test de présence : écarter d'abord les événements inconnus de SDL2.
         SDL_PumpEvents();
+        watch_drain(c);
         while ((*got = SDL_PeepEvents(&event, 1, SDL_PEEKEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) == 1 &&
                !rt_sdl_event_is_sdl2(event.type))
             SDL_PeepEvents(&event, 1, SDL_GETEVENT, event.type, event.type);
@@ -344,6 +430,7 @@ static void poll_into(CPU *c, uint32_t guest, int *got) {
         return;
     }
     while ((*got = SDL_PollEvent(&event)) && !rt_sdl_event_is_sdl2(event.type)) {}
+    watch_drain(c);
     // F3 : compteur d'images hôte (fps_overlay.c). La touche reste transmise au
     // jeu, qui ne l'associe à rien par défaut.
     if (*got && event.type == SDL_KEYDOWN && !event.key.repeat && event.key.keysym.scancode == SDL_SCANCODE_F3)
@@ -400,6 +487,7 @@ static int sdl_input_shim(CPU *c, const char *name) {
             if ((*link)->function == function && (*link)->userdata == userdata) {
                 Watch *w = *link; *link = w->next;
                 SDL_DelEventWatch(watch_trampoline, w);
+                watch_cancel(w);
                 free(w);
                 break;
             }

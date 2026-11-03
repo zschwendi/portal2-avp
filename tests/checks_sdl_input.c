@@ -4,6 +4,7 @@
 #include "checks.h"
 #include "sdl_common.h"
 #include <SDL2/SDL.h>
+#include <pthread.h>
 #include <stdlib.h>
 
 void rt_sdl_event_to_guest(CPU *c, const SDL_Event *host, uint32_t guest, int release_host);
@@ -25,12 +26,31 @@ static uint32_t call(CPU *c, const char *name, const uint32_t *args, unsigned co
 // Fonction « invitée » d'observation : atteinte par rt_invoke → rt_dispatch.
 static uint8_t seen[56];
 static uint32_t seen_userdata, seen_calls;
+static CPU *expected_watch_cpu;
+static int seen_on_expected_cpu;
+static char seen_text[128];
+static int remove_watch_in_callback;
 static int fake_watch(CPU *c, const char *name) {
     if (strcmp(name, "test_sdl_watch")) return 0;
     seen_userdata = R32(c->esp + 4);
     uint32_t event = R32(c->esp + 8);
+    // Native SDL2 also watches its private pump sentinel; sdl2-compat does not.
+    // Count input notifications in this fixture, without filtering production watches.
+    if (R32(event) == SDL_POLLSENTINEL) { c->eax = 1; return 1; }
     memcpy(seen, GPTR(event), 56);
+    uint32_t text = R32(event) == SDL_DROPFILE ? R32(event + 8) :
+                    R32(event) == SDL_TEXTEDITING_EXT ? R32(event + 12) : 0;
+    if (text) SDL_strlcpy(seen_text, (const char *)GPTR(text), sizeof(seen_text));
     ++seen_calls;
+    // CPU arguments are noescape: compare during the callback, retain only a boolean.
+    seen_on_expected_cpu = c == expected_watch_cpu;
+    if (remove_watch_in_callback) {
+        uint32_t saved_esp = c->esp;
+        PUSH(c, seen_userdata);
+        PUSH(c, rt_dynamic_import("test_sdl_watch"));
+        rt_call(c, rt_dynamic_import("SDL_DelEventWatch"), RT_RETURN_SENTINEL);
+        c->esp = saved_esp;
+    }
     c->eax = 1;
     return 1;
 }
@@ -178,6 +198,107 @@ RT_CHECK(sdl_input_events_translate_to_i386) {
     assert(call(c, "SDL_GetMouseState", mn, 2) == buttons);
     flush();
     SDL_QuitSubSystem(SDL_INIT_EVENTS);
+}
+
+typedef struct ForeignPush {
+    SDL_Event event;
+    SDL_atomic_t done;
+    int result;
+} ForeignPush;
+
+static void *foreign_push(void *opaque) {
+    ForeignPush *push = opaque;
+    push->result = SDL_PushEvent(&push->event);
+    memset(&push->event, 0xcc, sizeof(push->event)); // producer storage is transient
+    SDL_AtomicSet(&push->done, 1);
+    return NULL;
+}
+
+static void push_without_guest_context(SDL_Event event) {
+    ForeignPush push = {.event = event};
+    pthread_t thread;
+    // A native producer must complete even while the game holds its gate. Simply
+    // attaching the producer as a guest thread would deadlock against SDL's lock.
+    rt_guest_enter();
+    assert(!pthread_create(&thread, NULL, foreign_push, &push));
+    uint64_t deadline = SDL_GetTicks64() + 2000;
+    while (!SDL_AtomicGet(&push.done) && SDL_GetTicks64() < deadline) SDL_Delay(1);
+    int completed = SDL_AtomicGet(&push.done);
+    rt_guest_leave();
+    assert(completed);
+    assert(!pthread_join(thread, NULL) && push.result == 1);
+}
+
+RT_CHECK(sdl_input_foreign_keyboard_watch_is_delivered_on_guest_pump) {
+    assert(!SDL_InitSubSystem(SDL_INIT_EVENTS));
+    CPU cpu, *c = &cpu; rt_cpu_reset(c); flush();
+    uint32_t watch[] = {rt_dynamic_import("test_sdl_watch"), 0x2000a123};
+    call(c, "SDL_AddEventWatch", watch, 2);
+    seen_calls = 0; expected_watch_cpu = c; seen_on_expected_cpu = 0;
+    SDL_Event event = {0};
+    event.key.type = SDL_KEYDOWN; event.key.state = SDL_PRESSED;
+    event.key.keysym.scancode = SDL_SCANCODE_E; event.key.keysym.sym = SDLK_e;
+    push_without_guest_context(event);
+    assert(seen_calls == 0); // no guest execution on GameController's native thread
+    assert(poll_guest(c) == 1 && R32(EVENT) == SDL_KEYDOWN);
+    assert(seen_calls == 1);
+    assert(seen_on_expected_cpu);
+    assert(seen_userdata == watch[1]);
+    uint32_t scancode; memcpy(&scancode, seen + 16, sizeof(scancode));
+    assert(scancode == SDL_SCANCODE_E); // copied before producer storage was overwritten
+
+    event = (SDL_Event){0}; event.text.type = SDL_TEXTINPUT;
+    SDL_strlcpy(event.text.text, "portal", sizeof(event.text.text));
+    push_without_guest_context(event);
+    assert(poll_guest(c) == 1 && R32(EVENT) == SDL_TEXTINPUT);
+    assert(seen_calls == 2 && !strcmp((const char *)seen + 12, "portal"));
+    call(c, "SDL_DelEventWatch", watch, 2);
+    expected_watch_cpu = NULL;
+    flush(); SDL_QuitSubSystem(SDL_INIT_EVENTS);
+}
+
+RT_CHECK(sdl_input_removing_watch_cancels_deferred_notifications) {
+    assert(!SDL_InitSubSystem(SDL_INIT_EVENTS));
+    CPU cpu, *c = &cpu; rt_cpu_reset(c); flush();
+    uint32_t watch[] = {rt_dynamic_import("test_sdl_watch"), 0x2000b123};
+    SDL_Event event = {0}; event.user.type = SDL_USEREVENT + 4;
+    call(c, "SDL_AddEventWatch", watch, 2); seen_calls = 0;
+    push_without_guest_context(event);
+    call(c, "SDL_DelEventWatch", watch, 2);
+    assert(poll_guest(c) == 1 && R32(EVENT) == event.type && seen_calls == 0);
+
+    // Removing a watch from its own callback cancels later queued notifications
+    // without invalidating the callback currently being delivered.
+    call(c, "SDL_AddEventWatch", watch, 2);
+    push_without_guest_context(event); push_without_guest_context(event);
+    remove_watch_in_callback = 1;
+    assert(poll_guest(c) == 1 && seen_calls == 1);
+    remove_watch_in_callback = 0;
+    assert(poll_guest(c) == 1 && seen_calls == 1);
+    flush(); SDL_QuitSubSystem(SDL_INIT_EVENTS);
+}
+
+void rt_sdl_test_native_watch(uint32_t function, uint32_t userdata, SDL_Event *event);
+RT_CHECK(sdl_input_deferred_watch_owns_transient_strings) {
+    assert(!SDL_InitSubSystem(SDL_INIT_EVENTS));
+    CPU cpu, *c = &cpu; rt_cpu_reset(c); flush();
+    uint32_t watch[] = {rt_dynamic_import("test_sdl_watch"), 0x2000c123};
+    call(c, "SDL_AddEventWatch", watch, 2); seen_calls = 0;
+    SDL_Event event = {0}; event.drop.type = SDL_DROPFILE;
+    event.drop.file = SDL_strdup("/tmp/original.dem");
+    rt_sdl_test_native_watch(watch[0], watch[1], &event);
+    SDL_strlcpy(event.drop.file, "changed", 17); SDL_free(event.drop.file);
+    uint32_t none[] = {0}; call(c, "SDL_PollEvent", none, 1);
+    assert(seen_calls == 1 && !strcmp(seen_text, "/tmp/original.dem"));
+
+    event = (SDL_Event){0}; event.editExt.type = SDL_TEXTEDITING_EXT;
+    event.editExt.text = SDL_strdup("original composition");
+    rt_sdl_test_native_watch(watch[0], watch[1], &event);
+    SDL_strlcpy(event.editExt.text, "changed", 21); SDL_free(event.editExt.text);
+    call(c, "SDL_PollEvent", none, 1);
+    assert(seen_calls == 2 && !strcmp(seen_text, "original composition"));
+    call(c, "SDL_DelEventWatch", watch, 2);
+    flush(); SDL_QuitSubSystem(SDL_INIT_EVENTS);
 }
 
 RT_CHECK(sdl_input_joysticks_and_struct_return) {
