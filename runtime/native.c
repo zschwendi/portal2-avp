@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 int rt_paths_case_insensitive(void);   // paths.c
 
@@ -87,3 +90,21 @@ int rt_native_change_accessor(CPU *c, uint32_t entry) {
     rt_return(c);
     return 1;
 }
+
+// CWeaponPortalgun::TraceFirePortal(this, const Vector &début, const Vector
+// &direction, bool portal2, PortalPlacedBy_t, TracePortalPlacementData_t &)
+// du server.so, et sa copie de prédiction du client.so (C_WeaponPortalgun) :
+// cdecl Linux, tout sur la pile. Sur visionOS, quand la manette Sense droite
+// suivie vise (runtime/visionos/aim_vision.c), le rayon que l'appelant a
+// préparé est réécrit puis la fonction traduite s'exécute (retour 0). Partout
+// ailleurs, et dès qu'un contrôle échoue, rien n'est changé.
+#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
+int p2_vision_trace_fire_portal(CPU *c, uint32_t entry, int client);
+#else
+static int p2_vision_trace_fire_portal(CPU *c, uint32_t entry, int client) {
+    (void)c; (void)entry; (void)client;
+    return 0;
+}
+#endif
+int rt_native_trace_fire_portal(CPU *c, uint32_t entry) { return p2_vision_trace_fire_portal(c, entry, 0); }
+int rt_native_trace_fire_portal_client(CPU *c, uint32_t entry) { return p2_vision_trace_fire_portal(c, entry, 1); }

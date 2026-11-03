@@ -5,9 +5,13 @@ import CompositorServices
 struct Portal2AVPApp: App {
     var body: some Scene {
         #if P2_GAME
-        WindowGroup(id: "game-window") { PortalGameView() }.defaultSize(width: 1000, height: 680)
-        ImmersiveSpace(id: "game-world") {
-            CompositorLayer(configuration: PortalLayerConfiguration()) { layer in PortalRenderer.start(layer: layer) }
+        WindowGroup(id: PortalGameFlow.windowID) { PortalGameView() }.defaultSize(width: 1000, height: 680)
+        // Opened with its attempt number, so each layer is matched to the
+        // attempt that asked for it (PortalGameFlow).
+        ImmersiveSpace(id: PortalGameFlow.spaceID, for: UInt64.self) { attempt in
+            CompositorLayer(configuration: PortalLayerConfiguration()) { layer in
+                PortalRenderer.start(layer: layer, attempt: attempt.wrappedValue ?? 0)
+            }
         }
             .immersionStyle(selection: .constant(.full),in: .full)
         #else
@@ -82,7 +86,11 @@ private struct RendererCheckView: View {
     }
 }
 
+// userInfo: "attempt" (space value), "session" (renderer xr session, 0 if it
+// never presented) and "renderer" (serial) as UInt64; ready adds "world" Bool.
+// Stopped is posted only after the renderer's last command buffer completed.
 extension Notification.Name {
     static let portalRendererStopped = Notification.Name("Portal2RendererStopped")
+    static let portalRendererReady = Notification.Name("Portal2RendererReady")
     static let portalRequestWindow = Notification.Name("Portal2RequestWindow")
 }

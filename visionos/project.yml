@@ -44,6 +44,7 @@ targets:
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_NSWorldSensingUsageDescription: Head tracking places Portal 2 around you.
         INFOPLIST_KEY_NSAccessoryTrackingUsageDescription: Track your Sense controllers to aim and interact in Portal 2.
+        INFOPLIST_KEY_NSHandsTrackingUsageDescription: Pinch gestures let you move, jump and fire portals in immersive Portal 2 when no controller is in use.
         TARGETED_DEVICE_FAMILY: 7
         P2_HOST_DEPS: $(SRCROOT)/../deps/visionos/device
         "P2_HOST_DEPS[sdk=xrsimulator*]": $(SRCROOT)/../deps/visionos/sim

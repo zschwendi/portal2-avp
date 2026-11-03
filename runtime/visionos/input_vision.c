@@ -7,6 +7,9 @@
 #include <string.h>
 #include "input_vision.h"
 #include "p2_xr.h"
+#if P2_VISION_GAME
+#include "view_vision.h"
+#endif
 
 static SDL_Joystick *pad;
 static SDL_JoystickID pad_id = -1;
@@ -69,6 +72,24 @@ static void audit_input(P2XRInput *input) {
     if (stage == 7) input->orange_trigger = 1;
     if (stage == 9 || stage == 11) input->buttons = P2_XR_PAUSE;
 }
+
+// Hands cannot see the game's menus, and a pinch there would select items.
+// While the game UI (menus, pause, loading) is visible hand input is neutral,
+// and it stays neutral until every pinch has been released, so a pinch held
+// across a menu never fires on resume. Controllers are unaffected.
+static void gate_hands(P2XRInput *input) {
+    static int blocked;
+    if (input->connected != P2_VISION_INPUT_HANDS) { blocked = 0; return; }
+    rt_ios_game_state_poll();
+    int idle = !input->buttons && input->blue_trigger <= 0 && input->orange_trigger <= 0 &&
+        input->move_x == 0 && input->move_y == 0 && input->turn_x == 0 && input->look_y == 0;
+    if (rt_ios_game_ui_visible()) blocked = 1;
+    else if (blocked && idle) blocked = 0;
+    if (!blocked) return;
+    input->move_x = input->move_y = input->turn_x = input->look_y = 0;
+    input->blue_trigger = input->orange_trigger = 0;
+    input->buttons = 0;
+}
 #endif
 
 int p2_vision_input_init(void) {
@@ -123,12 +144,28 @@ void p2_vision_input_poll(void) {
         retry_at = 0;
     }
     P2XRInput input;
-    p2_xr_read_controls(&input); // Invalid/retired/tracking-lost is neutral.
+    // Invalid/retired session or lost head tracking is neutral; a lost right
+    // Sense controller releases only the actions held at that moment.
+    p2_xr_read_controls(&input);
 #if P2_VISION_GAME
+    // Keep the game-UI flag fresh even when no RenderView runs (menus);
+    // the pause-to-window flow and hand gating read it. Rate-limited to 10 Hz.
+    rt_ios_game_state_poll();
     audit_input(&input);
+    gate_hands(&input);
+#endif
+    // While the head drives engine angles, the engine side turns a host body
+    // yaw from P2XRInput.turn_x (snap/smooth), so the guest pad's right stick
+    // stays centered. A refused head aim or a pre-alignment gap keeps stick
+    // turning; windowed play keeps stick yaw/pitch.
+#if P2_VISION_GAME
+    int immersive = p2_vision_head_aim_active();
+#else
+    int immersive = 0;
 #endif
     const Sint16 axes[SDL_CONTROLLER_AXIS_MAX] = {
-        stick(input.move_x),stick(-input.move_y),stick(input.turn_x),stick(-input.look_y),
+        stick(input.move_x),stick(-input.move_y),
+        immersive ? 0 : stick(input.turn_x),immersive ? 0 : stick(-input.look_y),
         trigger(input.orange_trigger),trigger(input.blue_trigger)
     };
     for (int axis = 0; axis < SDL_CONTROLLER_AXIS_MAX; ++axis)

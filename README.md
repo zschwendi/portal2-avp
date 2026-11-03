@@ -251,6 +251,11 @@ process.
   interface metadata generates the Steam bridge.
 - Touch controls inspired by
   [MacNativeGames](https://github.com/ly05010419/MacNativeGames) (MIT).
+- [SourceAutoRecord](https://github.com/p2sr/SourceAutoRecord) (MIT), for the
+  Linux Portal 2 CViewSetup layout, VEngineClient view-angle slot indices, the
+  TraceFirePortal Linux locator and the CalcViewModelLag signature used by the
+  visionOS head-aim, tracked-aim and viewmodel hooks (all validated locally
+  against owned binaries).
 
 ## License
 

@@ -14,6 +14,9 @@ typedef struct {
     void *right_surface;
     uint32_t eye_count, kind;
     uint64_t xr_session;
+    // Tracked stereo: the head/eye pose that rendered these pixels, with
+    // eyes[].projection replaced by the symmetric cover each image was
+    // actually rendered with (crop: sourceProj * inverse(currentProj)).
     P2XRFrame render_pose;
     int32_t slot;
 } P2VisionGLFrame;

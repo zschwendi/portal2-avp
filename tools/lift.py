@@ -1071,6 +1071,18 @@ NATIVE_OVERRIDES = {
     # partie, sv.edicts est déjà à zéro alors que des entités appellent encore
     # NetworkStateChanged : l'adresse calculée part dans le vide (voir native.c).
     ('engine.so', 0x586930): ('rt_native_change_accessor', 'CHANGE_ACCESSOR', CHANGE_ACCESSOR),
+    # CWeaponPortalgun::TraceFirePortal (server.so ; préfixe = signature Linux
+    # de p2sr/SourceAutoRecord, MIT) et sa copie de prédiction du client.so
+    # (C_WeaponPortalgun). Fonctions non virtuelles, un seul appel direct
+    # chacune : seul ce mécanisme peut viser avec la manette Sense suivie
+    # (runtime/visionos/aim_vision.c). Le remplacement ne fait que réécrire le
+    # rayon (origine, direction) puis rend 0 : la fonction traduite trace.
+    # Hors visionOS, et dès qu'un contrôle échoue, il rend 0 sans rien changer.
+    # Préfixes identiques à tools/visionos_hooks.py (tests/test_native_overrides.py).
+    ('server.so', 0x5a2250): ('rt_native_trace_fire_portal', 'TRACE_FIRE_PORTAL',
+                              '5589e557568db5f4f8ffff5381ec300700008b45146a008b5d0cff7508568985d0f8ffff'),
+    ('client.so', 0x8abe60): ('rt_native_trace_fire_portal_client', 'TRACE_FIRE_PORTAL_CLIENT',
+                              '5589e55756538d9df4f8ffff81ec300700008b45146a008b750cff7508538985d0f8ffff'),
 }
 
 

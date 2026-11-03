@@ -96,6 +96,17 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
         }
     }
 
+    // PSVR2 Sense mapping by fixed hardware chirality. PS/Home and share are
+    // never read; they stay with the system.
+    //   left  stick: move                  right stick: turn (X) / look (Y)
+    //   L2 trigger: orange (secondary)     R2 trigger: blue (primary)
+    //   Square (lower face): use           Cross (lower face): jump
+    //   Triangle (upper face): crouch      Circle (upper face): crouch
+    //   L1/R1 grip: use                    Options/Create as menu: pause
+    //   L3: recenter                       L3+R3 held 0.8 s: return to window
+    // visionOS may name a controller's face buttons a/b or x/y; with two face
+    // buttons per controller both spellings are read. A connected but not yet
+    // resolved pair still owns input (neutral), so a gamepad cannot fight it.
     @MainActor func inputSnapshot() -> P2XRInput? {
         guard present else { return nil }
         var input = P2XRInput()
@@ -103,35 +114,35 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
         var leftClick = false, rightClick = false
         for (accessory, controller) in bindings {
             let profile = controller.input
+            func pressed(_ names: GCButtonElementName...) -> Bool {
+                names.contains { profile.buttons[$0]?.pressedInput.isPressed == true }
+            }
             let stick = profile.dpads[.thumbstick]
             let trigger = profile.buttons[.trigger]?.pressedInput.value ?? 0
-            let grip = profile.buttons[.grip]?.pressedInput.isPressed == true
+            let lower = pressed(.a, .x), upper = pressed(.b, .y)
             switch accessory.inherentChirality {
             case .left:
-                leftClick = profile.buttons[.thumbstickButton]?.pressedInput.isPressed == true
+                leftClick = pressed(.thumbstickButton)
                 input.move_x = stick?.xAxis.value ?? 0
                 input.move_y = stick?.yAxis.value ?? 0
                 input.orange_trigger = trigger
-                if profile.buttons[.thumbstickButton]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_RECENTER.rawValue) }
-                if profile.buttons[.a]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_USE.rawValue) }
-                if profile.buttons[.b]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
+                if lower { input.buttons |= UInt32(P2_XR_USE.rawValue) }
+                if upper { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
             case .right:
-                rightClick = profile.buttons[.thumbstickButton]?.pressedInput.isPressed == true
-                input.connected = 1
+                rightClick = pressed(.thumbstickButton)
                 input.turn_x = stick?.xAxis.value ?? 0
                 input.look_y = stick?.yAxis.value ?? 0
                 input.blue_trigger = trigger
-                if profile.buttons[.a]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_JUMP.rawValue) }
-                if profile.buttons[.b]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
-            default: break
+                if lower { input.buttons |= UInt32(P2_XR_JUMP.rawValue) }
+                if upper { input.buttons |= UInt32(P2_XR_CROUCH.rawValue) }
+            default: continue
             }
-            if grip { input.buttons |= UInt32(P2_XR_USE.rawValue) }
-            if profile.buttons[.menu]?.pressedInput.isPressed == true { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
+            input.connected = 1
+            if pressed(.grip) { input.buttons |= UInt32(P2_XR_USE.rawValue) }
+            if pressed(.menu, .options) { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
         }
-        if leftClick && rightClick {
-            input.buttons |= UInt32(P2_XR_WINDOW.rawValue)
-            input.buttons &= ~UInt32(P2_XR_RECENTER.rawValue)
-        }
+        if leftClick && rightClick { input.buttons |= UInt32(P2_XR_WINDOW.rawValue) }
+        else if leftClick { input.buttons |= UInt32(P2_XR_RECENTER.rawValue) }
         return input
     }
 

@@ -35,10 +35,13 @@ def main():
     if missing:
         parser.error('visionOS host dependencies missing under ' + str(prefix) + ': ' + ', '.join(missing))
     # Refuse stale offsets before compiling a hook into the host. The emitted
-    # header contains a short validation signature and offsets, never game C.
+    # header contains short validation signatures and offsets, never game C.
+    # An engine.so mismatch only disables head aim; a server.so (or client
+    # viewmodel/prediction) mismatch only disables controller aim (fail closed).
     config = json.loads((ROOT / 'config/local.json').read_text())
-    profile = visionos_hooks.audit(Path(config['linux_root']) / 'portal2/bin/linux32/client.so')
-    visionos_hooks.write_header(ROOT / 'build/visionos/xr-profile.h', profile)
+    profile, engine = visionos_hooks.profile(config['linux_root'])
+    aim = visionos_hooks.aim_profile(config['linux_root'])
+    visionos_hooks.write_header(ROOT / 'build/visionos/xr-profile.h', profile, engine, aim)
     base = ['-target',triple,'-isysroot',sdk]
     runtime = [*base,'-O2','-g',*build_game.WARNINGS,'-DRT_FAST_MEMORY','-DP2_VISION_GAME=1','-Iruntime','-Iruntime/ios',
                '-Iruntime/visionos','-I' + str(prefix / 'include'),

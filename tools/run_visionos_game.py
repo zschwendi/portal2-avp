@@ -28,7 +28,7 @@ def main():
     parser.add_argument('--input-audit',action='store_true',help='synthetic SDL gameplay input audit (requires --map)')
     parser.add_argument('--frame-audit',action='store_true',help='log five-second engine frame timing intervals')
     parser.add_argument('--stereo-audit',action='store_true',help='diagnostic fixed-separation pair; not tracked stereo')
-    parser.add_argument('--immersive-test',action='store_true',help='expose the immersive development button after windowed acceptance')
+    parser.add_argument('--immersive-test',action='store_true',help='auto-enter immersive once per process after the window shows its first engine frame (the expand control is always available)')
     parser.add_argument('--app',type=Path,default=ROOT/'build/visionos/GameApp/Build/Products/Debug-xrsimulator/Portal2Game.app')
     args = parser.parse_args()
     inventory = json.loads(command('xcrun','simctl','list','devices','available','--json',capture=True).stdout)
@@ -63,6 +63,10 @@ def main():
     env['SIMCTL_CHILD_P2_VISION_INPUT_AUDIT'] = '1' if args.input_audit else '0'
     env['SIMCTL_CHILD_P2_VISION_FRAME_AUDIT'] = '1' if args.frame_audit else '0'
     env['SIMCTL_CHILD_P2_VISION_TEST_MAP'] = args.map or ''
+    # Optional XR tuning, passed through only when set in this shell.
+    for key in ('P2_XR_EYE_PIXELS','P2_XR_EYE_RESIZE','P2_XR_UNITS_PER_METER','P2_XR_SNAP_TURN_DEGREES',
+                'P2_XR_SMOOTH_TURN_DEGREES_PER_SECOND','P2_XR_HEAD_AIM','P2_NATIVE_TRACE_FIRE_PORTAL'):
+        if key in os.environ: env['SIMCTL_CHILD_'+key] = os.environ[key]
     if not args.audio:
         env['SIMCTL_CHILD_SDL_AUDIODRIVER'] = 'dummy'
         env['SIMCTL_CHILD_ALSOFT_DRIVERS'] = 'null'

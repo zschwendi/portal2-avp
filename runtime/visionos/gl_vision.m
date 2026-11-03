@@ -72,6 +72,9 @@ static EGLBoolean (*destroy_context)(EGLDisplay, EGLContext);
 static EGLContext (*get_current)(void);
 static void (*finish)(void);
 static EGLint (*get_error)(void);
+// Producer-thread presentation cadence (p2_vision_gl_cadence): consecutive
+// presents at most 100 ms apart, and consecutive tracked stereo presents.
+static P2VisionGLCadence cadence;
 
 static void *open_framework(NSString *name) {
     NSString *path = [[[NSBundle mainBundle] privateFrameworksPath] stringByAppendingPathComponent:
@@ -198,6 +201,10 @@ fail:
     return NULL;
 }
 void *p2_vision_gl_current_context(void) { return get_current ? get_current() : NULL; }
+int p2_vision_gl_on_producer_thread(void) {
+    return host && get_current && get_current() == host->context;
+}
+void p2_vision_gl_cadence(P2VisionGLCadence *out) { if (out) *out = cadence; }
 void *p2_vision_gl_share_group(void *context) { return context && host ? host->context : NULL; }
 int p2_vision_gl_make_current(SDL_Window *window, SDL_GLContext opaque) {
     (void)window;
@@ -243,6 +250,7 @@ int p2_vision_gl_resize(int width, int height) {
     context->pending_kind = 0;
     pthread_mutex_unlock(&lock);
     free_slots(context,previous);
+    cadence.steady = cadence.stereo = 0;
     fprintf(stderr,"[gl-vision] Resized native IOSurface pool to %dx%d\n",width,height);
     return 0;
 }
@@ -354,6 +362,10 @@ void p2_vision_gl_present(void) {
     context->slots[context->writing].sequence = ++context->sequence;
     SurfaceSlot *completed = &context->slots[context->writing];
     completed->kind = context->pending_kind ? context->pending_kind : P2_VISION_MONO;
+    uint64_t now = SDL_GetTicks64();
+    cadence.steady = cadence.last_ms && now - cadence.last_ms <= 100 && cadence.steady < 100000 ? cadence.steady + 1 : 0;
+    cadence.stereo = completed->kind == P2_VISION_TRACKED_STEREO && cadence.stereo < 100000 ? cadence.stereo + 1 : 0;
+    cadence.last_ms = now;
     completed->xr_session = context->pending_session;
     completed->render_pose = context->pending_pose;
     context->pending_kind = 0; context->pending_session = 0;

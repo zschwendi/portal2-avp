@@ -6,14 +6,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 #include "game_vision.h"
 #include "input_vision.h"
 #include <SDL.h>
 
 int p2_main(int argc, char **argv);
+int rt_ios_game_ui_visible_shared(void); // runtime/ios/game_state.c
 static _Atomic int state;
 int p2_vision_game_state(void) { return atomic_load(&state); }
+int p2_vision_game_ui_visible(void) { return atomic_load(&state) == 1 && rt_ios_game_ui_visible_shared(); }
+
+// Immersive eye size request: width << 32 | height, 0 for the windowed size.
+static _Atomic uint64_t eye_request, eye_withdrawn_ns;
+static _Atomic int eye_mode;
+void p2_vision_request_eye_size(int width, int height) {
+    uint64_t value = width > 0 && height > 0 && width <= 8192 && height <= 8192 ?
+        (uint64_t)(uint32_t)width << 32 | (uint32_t)height : 0;
+    // Stamp before withdrawing, so a reader never pairs 0 with an old stamp.
+    // Callers serialize (PortalPresentation's lock).
+    if (!value && atomic_load(&eye_request)) atomic_store(&eye_withdrawn_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    atomic_store(&eye_request, value);
+}
+void p2_vision_requested_eye_size(int *width, int *height) {
+    uint64_t value = atomic_load(&eye_request);
+    if (width) *width = (int)(value >> 32);
+    if (height) *height = (int)(value & 0xffffffffu);
+}
+void p2_vision_set_eye_mode(int active) { atomic_store(&eye_mode, active != 0); }
+int p2_vision_display_restoring(void) {
+    if (!atomic_load(&eye_mode) || atomic_load(&eye_request)) return 0;
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - atomic_load(&eye_withdrawn_ns) < 2500000000ull;
+}
+// Placeholder until the engine-side controller aim code links its strong
+// definition (a strong symbol replaces this weak one at link time).
+__attribute__((weak)) int p2_vision_controller_aim_active(void) { return -1; }
 
 int p2_vision_game_start(void) {
     if (atomic_load(&state) == 1 || atomic_load(&state) == 2) return 0;

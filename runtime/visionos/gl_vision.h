@@ -22,3 +22,11 @@ int p2_vision_gl_begin_eye(uint32_t eye);
 int p2_vision_gl_end_eye(uint32_t eye);
 int p2_vision_gl_capture_target(uint32_t eye);
 int p2_vision_gl_mark_stereo(uint64_t session, const P2XRFrame *pose, int diagnostic);
+// Engine (producer) thread only. Nonzero when the producer EGL context is
+// current on the calling thread, i.e. the engine's render thread.
+int p2_vision_gl_on_producer_thread(void);
+// Recent presentation cadence: `steady` consecutive presents no more than
+// 100 ms apart, `stereo` consecutive tracked-stereo presents, `last_ms` the
+// SDL_GetTicks64 time of the last present. A pool resize resets both counts.
+typedef struct { unsigned steady, stereo; uint64_t last_ms; } P2VisionGLCadence;
+void p2_vision_gl_cadence(P2VisionGLCadence *cadence);

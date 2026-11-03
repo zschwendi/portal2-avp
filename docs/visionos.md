@@ -128,6 +128,62 @@ and UBSan. The broader native ABI run currently fails an existing SDL event
 timestamp assertion against Homebrew's SDL2 compatibility library; that suite
 is not reported as passing. The mobile targets use the pinned SDL2 source.
 
+## Immersive play (Oct 31 – Nov 2 implementation)
+
+Everything in this section builds and passes host tests; **none of it is
+accepted on hardware yet** (see the gates below).
+
+- **Window ↔ immersive.** The window shows an expand-arrows ornament while
+  the engine runs. Expanding opens the immersive space for the *same* engine
+  process; the window is retired only after the accepted renderer's first
+  GPU-completed valid frame, and cancel/error/8 s timeout keeps it. Pausing
+  in immersive (pause press, then game UI held ≥300 ms after stereo play)
+  opens the window first and then dismisses the space, so the windowed pause
+  menu shows the same running game. Stick-hold (L3+R3, 0.8 s) and system
+  dismissal also return. Attempt/serial guards ignore stale renderers, one
+  consumer owns engine frames at a time, and re-entry waits until the last
+  renderer's command buffers completed.
+- **Stereo.** Each eye renders a symmetric frustum covering its compositor
+  view (CViewSetup `fov` is horizontal at `aspect = width/height`); the
+  compositor crops it. During steady stereo play the engine switches to a
+  near-square eye-sized mode (`mat_setvideomode`, default cap 1440×1440,
+  `P2_XR_EYE_PIXELS`) and restores 1280×720 for the window; it falls back
+  to the 16:9 cover if the mode does not take (`P2_XR_EYE_RESIZE=0`
+  disables it). Menus appear on a world-locked panel.
+- **Head aim and turning.** Engine view angles follow the head through
+  `VEngineClient015` Get/SetViewAngles (SHA-pinned engine profile, fail
+  closed). A host body yaw owns tracking space; any engine yaw change we did
+  not write (stick, portal crossing, teleport) re-bases it once, so portal
+  crossings are yaw-only. Snap turn 45° by default
+  (`P2_XR_SNAP_TURN_DEGREES`), optional smooth turn
+  (`P2_XR_SMOOTH_TURN_DEGREES_PER_SECOND`), world scale
+  `P2_XR_UNITS_PER_METER` (39.37), `P2_XR_HEAD_AIM=0` opts out.
+- **Tracked Sense portal aim.** Lifter native overrides on the server and
+  client (prediction) TraceFirePortal entries rewrite the player's shot ray
+  to the right Sense controller's aim pose, only for the audited single call
+  site, a fresh tracked pose and an unblocked start inside the player hull;
+  otherwise the head ray is kept. The portal-gun viewmodel follows the right
+  controller (CalcViewModelView hook; `P2_XR_VIEWMODEL=0`,
+  `P2_XR_VIEWMODEL_OFFSET`). A cyan laser shows the aim. Opt out with
+  `P2_NATIVE_TRACE_FIRE_PORTAL=0`. Grab and use follow head aim.
+- **Controls.** Owner per tick: connected Sense pair, else a gamepad in use
+  (+0.75 s), else immersive hands. DualSense mapping is unchanged (PS/Home
+  and Create are never read). Hands (immersive only, own ARKit session):
+  left index pinch + arm movement = move stick (2 cm dead zone, 12 cm full),
+  left middle pinch = jump, right index = blue, right middle = orange, with
+  hysteresis, palm-toward-head suppression, neutral in menus and on loss.
+  Hand tracking starts only after 1 s with no controller connected.
+- Offsets come from the owned Linux binaries and are validated at build and
+  run time; SourceAutoRecord (MIT) indices/layouts are credited. Portal2VR,
+  its forks and SourceVR are unlicensed and were used only as behaviour
+  references — no code from them is included.
+
+Hardware gates, in order: (1) sustained windowed play with DualSense and
+both Sense controllers; (2) stereo parallax, head 6DoF, portal travel and
+the eye-size switch; (3) tracked Sense portal aim and viewmodel; (4)
+repeated expand / pause-to-window cycles with game, audio and input intact;
+(5) hands.
+
 ## Work needed for a playable build
 
 1. Finish and exercise the full visionOS engine build against the owned
@@ -157,9 +213,9 @@ is not reported as passing. The mobile targets use the pinned SDL2 source.
 
 | Feature | Current evidence / next gate |
 | --- | --- |
-| Native fully immersive gameplay | Paired capture and game compositor integration in development; physical stereo, aiming, portal behavior and performance pending |
+| Native fully immersive gameplay | Stereo, head aim, eye-size mode, expand/pause-to-window and tracked Sense aim implemented and host-tested; physical stereo, aiming, portal behavior and performance pending |
 | Windowed visionOS; iPhone/iPad | VisionOS simulator real movement/look/pause and save/reload exercised; native iPad simulator room observed; physical controls/playability pending |
-| DualSense / PSVR2 Sense | Native input/pose adapters and synthetic SDL route pass; hardware controls and game aiming unverified |
+| DualSense / PSVR2 Sense / hands | Arbitrated input, full Sense mapping, tracked portal aim and hand gestures implemented with host tests; hardware controls and aiming unverified |
 | Original campaign/physics/saves | Aim to retain original recompiled code and content; visionOS behavior untested |
 | Content mods/custom maps | Preserve the retail filesystem and archives; actual mounting and playthrough untested |
 | Workshop subscriptions/downloads | Not available through upstream iOS Steam stubs; manual owned content is the first candidate |
