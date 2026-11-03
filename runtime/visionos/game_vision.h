@@ -1,8 +1,19 @@
 #pragma once
+#include "../content_check.h"
 // One engine lifetime per app process. 0 idle, 1 starting/running, 2 returned,
-// -1 missing retail/prepared files. Displayed GPU frames are tracked separately.
-int p2_vision_game_start(void);
+// -1 owned content missing or incomplete. Displayed GPU frames are tracked separately.
+// Starts only when the owned content under Documents is complete
+// (content_check.h); otherwise returns -1 and p2_vision_content_last has the
+// reason. Returns 0 when it started it, or when it is already running or
+// returned. `trigger` ("launch", "check-again", ...) is recorded with every
+// check in Documents/portal2-setup-status.json. Any thread.
+int p2_vision_game_start(const char *trigger);
 int p2_vision_game_state(void);
+// Runs the completeness check without starting the engine (also writes the
+// status file, and remembers the report). Returns report->complete. Any thread.
+int p2_vision_content_check(const char *trigger, P2ContentReport *report);
+// The last check's report, with the volume sizes; 0 when none ran yet.
+int p2_vision_content_last(P2ContentReport *report);
 // IEngineVGui::IsGameUIVisible (menus, pause, loading) as last polled on the
 // game thread; 0 unless the engine is running. Safe from any thread. The poll
 // runs from the engine's own render/input paths, so the value may lag.

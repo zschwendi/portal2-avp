@@ -1,10 +1,13 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_VISION
 #import <Foundation/Foundation.h>
+#include <errno.h>
 #include <mach-o/dyld.h>
+#include <os/lock.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
@@ -43,18 +46,91 @@ int p2_vision_display_restoring(void) {
 // definition (a strong symbol replaces this weak one at link time).
 __attribute__((weak)) int p2_vision_controller_aim_active(void) { return -1; }
 
-int p2_vision_game_start(void) {
-    if (atomic_load(&state) == 1 || atomic_load(&state) == 2) return 0;
-    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSFileManager *files = NSFileManager.defaultManager;
-    for (NSString *relative in @[@"game/portal2/pak01_dir.vpk", @"linux/portal2_linux", @"prep/layout.json"]) {
-        if (![files fileExistsAtPath:[documents stringByAppendingPathComponent:relative]]) {
-            atomic_store(&state, -1);
-            return -1;
-        }
+// ---- Owned-content gate ------------------------------------------------------
+// The engine must never start with missing or short VPK archives: it dies
+// after "Tried to Seek/Read NULL file handle!" with no crash report.
+static os_unfair_lock report_lock = OS_UNFAIR_LOCK_INIT;
+static P2ContentReport last_report;
+static int have_report;
+
+static NSString *documents_folder(void) {
+    return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+}
+
+// Checks Documents, adds the volume sizes and remembers the report.
+static int content_check(NSString *documents, P2ContentReport *report) {
+    p2_content_check(documents.length ? documents.fileSystemRepresentation : NULL, report);
+    if (documents.length) {
+        NSArray<NSURLResourceKey> *keys = @[NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeTotalCapacityKey];
+        NSDictionary<NSURLResourceKey, id> *values =
+            [[NSURL fileURLWithPath:documents isDirectory:YES] resourceValuesForKeys:keys error:nil];
+        NSNumber *available = values[NSURLVolumeAvailableCapacityForImportantUsageKey];
+        NSNumber *total = values[NSURLVolumeTotalCapacityKey];
+        if ([available isKindOfClass:NSNumber.class]) report->volume_available = available.longLongValue;
+        if ([total isKindOfClass:NSNumber.class]) report->volume_total = total.longLongValue;
     }
-    int expected = atomic_load(&state);
+    os_unfair_lock_lock(&report_lock);
+    last_report = *report;
+    have_report = 1;
+    os_unfair_lock_unlock(&report_lock);
+    if (!report->complete)
+        NSLog(@"[vision-game] Owned content incomplete: %d required file(s) missing, %d of %d archives missing, "
+              "%d short, %d bad index(es), about %lld bytes missing; first: %s",
+              report->required_missing, report->missing_archives, report->archives, report->short_archives,
+              report->bad_directories, (long long)report->missing_bytes, p2_content_report_name(report, 0));
+    return report->complete;
+}
+
+// Documents/portal2-setup-status.json, read remotely with devicectl.
+static void content_status(NSString *documents, const P2ContentReport *report, const char *trigger, int started) {
+    if (!documents.length) return;
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    id version = info[@"CFBundleShortVersionString"], build = info[@"CFBundleVersion"];
+    P2ContentStatus status = {
+        .platform = "visionOS",
+        .app_version = [version isKindOfClass:NSString.class] ? [version UTF8String] : NULL,
+        .app_build = [build isKindOfClass:NSString.class] ? [build UTF8String] : NULL,
+        .trigger = trigger && *trigger ? trigger : "unspecified",
+        .engine_started = started,
+    };
+    NSString *path = [documents stringByAppendingPathComponent:@(P2_CONTENT_STATUS_FILE)];
+    if (p2_content_write_status(path.fileSystemRepresentation, report, &status))
+        NSLog(@"[vision-game] Could not write %s: %s", P2_CONTENT_STATUS_FILE, strerror(errno));
+}
+
+int p2_vision_content_check(const char *trigger, P2ContentReport *out) {
+    @autoreleasepool {
+        NSString *documents = documents_folder();
+        P2ContentReport report;
+        int complete = content_check(documents, &report);
+        content_status(documents, &report, trigger, atomic_load(&state) == 1);
+        if (out) *out = report;
+        return complete;
+    }
+}
+
+int p2_vision_content_last(P2ContentReport *out) {
+    os_unfair_lock_lock(&report_lock);
+    int have = have_report;
+    if (have && out) *out = last_report;
+    os_unfair_lock_unlock(&report_lock);
+    return have;
+}
+
+int p2_vision_game_start(const char *trigger) {
+    int current = atomic_load(&state);
+    if (current == 1 || current == 2) return 0;
+    NSString *documents = documents_folder();
+    NSFileManager *files = NSFileManager.defaultManager;
+    P2ContentReport report;
+    if (!content_check(documents, &report)) {
+        atomic_compare_exchange_strong(&state, &current, -1);  // never overwrite a concurrent start
+        content_status(documents, &report, trigger, atomic_load(&state) == 1);
+        return atomic_load(&state) == -1 ? -1 : 0;
+    }
+    int expected = current;
     if (!atomic_compare_exchange_strong(&state, &expected, 1)) return 0;
+    content_status(documents, &report, trigger, 1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         @autoreleasepool {
             NSString *user = [documents stringByAppendingPathComponent:@"portal2-userdata"];

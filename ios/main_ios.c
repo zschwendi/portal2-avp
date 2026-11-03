@@ -7,6 +7,9 @@
 // complété par Documents/launch.args s'il existe.
 // --user-dir, --images, --game-dir et --linux-root manquants : dossiers
 // portal2-userdata, prep, game et linux de Documents (s'ils existent).
+// Le moteur ne démarre qu'avec un contenu complet (runtime/ios/content_gate.m :
+// écran d'installation sinon, Documents/portal2-setup-status.json à chaque
+// vérification).
 #include <SDL_main.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
@@ -16,6 +19,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "content_gate.h"
 #include "settings.h"
 
 int p2_main(int argc, char **argv);
@@ -82,6 +86,28 @@ int main(int argc, char **argv) {
             snprintf(documents, sizeof(documents), "%s/Documents", getenv("HOME"));
             read_launch_file(documents);
         }
+    }
+    // Contenu du joueur incomplet (archives VPK manquantes ou tronquées : le
+    // moteur mourrait sur « Tried to Seek NULL file handle! ») : écran
+    // d'installation (runtime/ios/content_gate.m) jusqu'à ce qu'il soit complet.
+    // Racines vérifiées : celles des options, sinon les dossiers de Documents.
+    if (getenv("HOME")) {
+        char documents[PATH_MAX], folders[3][PATH_MAX];
+        snprintf(documents, sizeof(documents), "%s/Documents", getenv("HOME"));
+        mkdir(documents, 0755);
+        static const char *const options[3] = {"--game-dir", "--linux-root", "--images"};
+        static const char *const names[3] = {"game", "linux", "prep"};
+        const char *roots[3];
+        for (int r = 0; r < 3; ++r) {
+            roots[r] = NULL;
+            for (int i = 1; i + 1 < count && strcmp(arguments[i], "--"); ++i)
+                if (!strcmp(arguments[i], options[r])) roots[r] = arguments[i + 1];
+            if (!roots[r]) {
+                snprintf(folders[r], sizeof(folders[r]), "%s/%s", documents, names[r]);
+                roots[r] = folders[r];
+            }
+        }
+        rt_ios_content_gate(roots[0], roots[1], roots[2], documents);
     }
     // Options du runtime absentes : dossiers de Documents (sur appareil, les
     // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles

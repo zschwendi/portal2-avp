@@ -39,7 +39,7 @@ targets:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) P2_GAME
         GCC_PREPROCESSOR_DEFINITIONS: $(inherited) P2_GAME=1
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Portal 2 Engine Test
+        INFOPLIST_KEY_CFBundleDisplayName: Portal 2
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_NSWorldSensingUsageDescription: Head tracking places Portal 2 around you.
