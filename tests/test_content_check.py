@@ -1,12 +1,14 @@
 """Owned-content completeness gate (runtime/content_check.c) and its launchers.
 
-The C checks build small synthetic VPK directory files and archives in a
-temporary folder; no game data is read or needed.
+The C checks build small synthetic VPK directory files, archives and content
+manifests in a temporary folder; no game data is read or needed.
 """
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +16,9 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 CHECK = ROOT / 'runtime/content_check.c'
 WARNINGS = ['-Wall', '-Wextra', '-Werror']
+spec = importlib.util.spec_from_file_location('owned_content_manifest', ROOT / 'tools/serve_owned_content.py')
+server_api = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server_api)
 
 
 def sdk_path(name):
@@ -23,13 +28,22 @@ def sdk_path(name):
 
 @unittest.skipUnless(os.uname().sysname == 'Darwin', 'Apple clang and sanitizers required')
 class ContentCheckTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix='p2-content-')
+        cls.binary = str(Path(cls.temp.name) / 'content-check')
+        subprocess.run(['xcrun', '--sdk', 'macosx', 'clang', '-O1', '-g', *WARNINGS,
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-I' + str(ROOT / 'runtime'), str(CHECK), str(ROOT / 'tests/content_check_test.c'),
+                        '-o', cls.binary], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
     def test_synthetic_vpk_trees(self):
         with tempfile.TemporaryDirectory(prefix='p2-content-') as directory:
-            binary = str(Path(directory) / 'content-check')
-            subprocess.run(['xcrun', '--sdk', 'macosx', 'clang', '-O1', '-g', *WARNINGS,
-                            '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                            '-I' + str(ROOT / 'runtime'), str(CHECK), str(ROOT / 'tests/content_check_test.c'),
-                            '-o', binary], check=True)
+            binary = self.binary
             scratch = Path(directory) / 'scratch'
             scratch.mkdir()
             result = subprocess.run([binary, str(scratch)], capture_output=True, text=True, timeout=120)
@@ -53,7 +67,82 @@ class ContentCheckTests(unittest.TestCase):
             self.assertEqual(status['volume_available_important_usage_bytes'], 1234567)
             self.assertIsNone(status['volume_total_bytes'])
             self.assertIsInstance(status['check_microseconds'], int)
+            # No manifest in that tree: the weaker check, its sentinel map present.
+            self.assertEqual((status['manifest'], status['manifest_bad'], status['maps_missing']), (False, False, False))
+            self.assertEqual((status['manifest_files'], status['manifest_missing'], status['manifest_wrong_size']), (0, 0, 0))
             self.assertLess(len((status_folder / 'portal2-setup-status.json').read_bytes()), 2048)
+
+            listed = json.loads((scratch / 'status-manifest/portal2-setup-status.json').read_text())
+            self.assertIs(listed['complete'], False)
+            self.assertEqual((listed['manifest'], listed['manifest_bad'], listed['maps_missing']), (True, False, False))
+            self.assertEqual((listed['manifest_files'], listed['manifest_missing'], listed['manifest_wrong_size']), (10, 1, 0))
+            self.assertEqual((listed['missing_archives'], listed['missing_bytes_estimate']), (0, 70))
+            self.assertEqual(listed['missing_names'], ['game/portal2/maps/sp_a2_laser_intro.bsp'])
+            self.assertEqual(sorted(listed), sorted(status))
+
+    def check(self, documents):
+        status = Path(documents).parent / 'check-status.json'
+        result = subprocess.run([self.binary, '--check', str(documents), str(status)], capture_output=True, text=True,
+                                timeout=60)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        report = json.loads(status.read_text())
+        self.assertEqual(report['complete'], result.returncode == 0)
+        return report
+
+    def test_python_manifest_writer_matches_gate(self):
+        """tools/serve_owned_content.py --write-content-manifest output, read by the C gate."""
+        with tempfile.TemporaryDirectory(prefix='p2-content-manifest-') as directory:
+            documents = Path(directory) / 'Documents'
+            files = {
+                'prep/layout.json': b'{}',
+                'linux/portal2_linux': b'\x7fELF' + bytes(60),
+                # Smallest valid VPK directory: v1 header and an empty tree.
+                'game/portal2/pak01_dir.vpk': struct.pack('<III', 0x55aa1234, 1, 1) + b'\0',
+                'game/portal2/maps/sp_a1_intro1.bsp': b'map' * 20,
+                'game/portal2/maps/sp_a2_laser_intro.bsp': b'map' * 30,
+                'game/portal2/maps/empty.txt': b'',
+                'game/bin/library.so': b'x' * 7,
+            }
+            for name, data in files.items():
+                (documents / name).parent.mkdir(parents=True, exist_ok=True)
+                (documents / name).write_bytes(data)
+            (documents / 'game/portal2/.DS_Store').write_bytes(b'skipped')
+            manifest = documents / server_api.CONTENT_MANIFEST_NAME
+            roots = server_api.source_roots(documents / 'game', documents / 'linux', documents / 'prep')
+            self.assertEqual(server_api.write_content_manifest(manifest, roots),
+                             (len(files), sum(len(data) for data in files.values())))
+            lines = manifest.read_text().splitlines()
+            self.assertEqual(lines[0], 'P2-CONTENT-MANIFEST 1')
+            self.assertEqual(sorted(lines[1:]), sorted(f'{len(data)}\t{name}' for name, data in files.items()))
+            self.assertEqual([p.name for p in documents.iterdir() if p.name.endswith('.tmp')], [])
+
+            report = self.check(documents)
+            self.assertIs(report['complete'], True)
+            self.assertEqual((report['manifest'], report['manifest_bad'], report['manifest_files']), (True, False, len(files)))
+            # A campaign map still copying: the archive checks pass, the manifest does not.
+            (documents / 'game/portal2/maps/sp_a2_laser_intro.bsp').unlink()
+            report = self.check(documents)
+            self.assertIs(report['complete'], False)
+            self.assertEqual((report['manifest_missing'], report['missing_archives'], report['missing_bytes_estimate']),
+                             (1, 0, 90))
+            self.assertEqual(report['missing_names'], ['game/portal2/maps/sp_a2_laser_intro.bsp'])
+            (documents / 'game/portal2/maps/sp_a2_laser_intro.bsp').write_bytes(b'map' * 29)
+            report = self.check(documents)
+            self.assertEqual((report['complete'], report['manifest_missing'], report['manifest_wrong_size']), (False, 0, 1))
+            (documents / 'game/portal2/maps/sp_a2_laser_intro.bsp').write_bytes(b'map' * 30)
+            # CRLF and no final line break read the same.
+            manifest.write_bytes(manifest.read_bytes().replace(b'\n', b'\r\n').rstrip(b'\r\n'))
+            self.assertIs(self.check(documents)['complete'], True)
+            manifest.write_bytes(b'P2-CONTENT-MANIFEST 1\n1\tgame/portal2/../../escape\n')
+            report = self.check(documents)
+            self.assertEqual((report['complete'], report['manifest_bad'], report['manifest_files']), (False, True, 0))
+            # Without a manifest: archives plus the sentinel map.
+            manifest.unlink()
+            self.assertEqual(self.check(documents)['manifest'], False)
+            self.assertIs(self.check(documents)['complete'], True)
+            (documents / 'game/portal2/maps/sp_a1_intro1.bsp').unlink()
+            report = self.check(documents)
+            self.assertEqual((report['complete'], report['maps_missing']), (False, True))
 
     def test_check_has_no_platform_dependencies(self):
         includes = re.findall(r'^#include\s+[<"]([^>"]+)[>"]', CHECK.read_text(), re.M)
@@ -81,12 +170,38 @@ class LauncherGateTests(unittest.TestCase):
         self.assertIn('if p2_vision_game_start(trigger) == 0 { return nil }', view)
         self.assertNotIn('engine test', view.lower())
         self.assertIn('Check again', view)
+        self.assertIn('game files are missing', view)
+        self.assertIn('the campaign maps (game/portal2/maps) are missing', view)
+
+    def test_importer_writes_manifest_last(self):
+        source = (ROOT / 'visionos/Sources/PortalContentImporter.swift').read_text()
+        header = (ROOT / 'runtime/content_check.h').read_text()
+        for name in ('P2_CONTENT_MANIFEST_FILE "portal2-content-manifest.txt"',
+                     'P2_CONTENT_MANIFEST_HEADER "P2-CONTENT-MANIFEST 1"'):
+            self.assertIn(name, header)
+            self.assertIn(name.split(' ', 1)[1], source)
+        self.assertEqual(server_api.CONTENT_MANIFEST_HEADER, 'P2-CONTENT-MANIFEST 1')
+        self.assertEqual(server_api.CONTENT_MANIFEST_NAME, 'portal2-content-manifest.txt')
+        perform = source[source.index('private func perform('):source.index('nonisolated static let retryDelays')]
+        # Built (and its paths checked) before any download; written only after the loop over every file.
+        self.assertLess(perform.index('contentManifestText(manifest)'), perform.index('for (index, (file, dest))'))
+        self.assertLess(perform.rindex('completedBytes = done\n        }'), perform.index('writeContentManifest('))
+        self.assertEqual(source.count('writeContentManifest(gateManifest'), 1)
+        writer = source[source.index('static func writeContentManifest('):source.index('static func rejectLinks(')]
+        self.assertIn('O_EXCL', writer)
+        self.assertIn('rename(temporary.path, destination.path)', writer)
+        self.assertNotIn('removeItem', writer)
 
     def test_ios_gate_runs_before_engine(self):
         main = (ROOT / 'ios/main_ios.c').read_text()
         self.assertLess(main.index('rt_ios_content_gate('), main.index('return p2_main('))
         gate = (ROOT / 'runtime/ios/content_gate.m').read_text()
         self.assertIn('while (!gate.passed)', gate)
+        # Default Documents roots get the manifest check; explicit roots keep the archive check.
+        self.assertIn('if (_documentsLayout) p2_content_check(_roots[3], &_report);', gate)
+        self.assertIn('else p2_content_check_roots(_roots[0], _roots[1], _roots[2], &_report);', gate)
+        self.assertIn('game files are missing', gate)
+        self.assertIn('the campaign maps (game/portal2/maps) are missing', gate)
         self.assertIn('NSURLVolumeAvailableCapacityForImportantUsageKey', gate)
         self.assertIn('tools/ios_device.sh data', gate)
 

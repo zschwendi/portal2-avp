@@ -44,6 +44,9 @@ final class PortalContentImporter: ObservableObject {
     nonisolated static let allowedGameDirs: Set<String> = ["bin", "platform", "update", "portal2", "portal2_dlc1", "portal2_dlc2"]
     nonisolated static let backupsFolder = "Portal2 Import Backups"
     nonisolated static let stagingFolder = "Portal2 Import Staging"
+    // The launch gate's list of owned files (runtime/content_check.h).
+    nonisolated static let contentManifestName = "portal2-content-manifest.txt"
+    nonisolated static let contentManifestHeader = "P2-CONTENT-MANIFEST 1"
     private var backupRun: URL?
     private var runID = UUID()
 
@@ -84,6 +87,7 @@ final class PortalContentImporter: ObservableObject {
         let manifestSize = (try fm.attributesOfItem(atPath: manifestFile.path)[.size] as? NSNumber)?.int64Value ?? 0
         guard manifestSize <= 64 << 20 else { throw PortalContentImportError.badManifest("too large") }
         let manifest = try Self.validate(try Data(contentsOf: manifestFile))
+        let gateManifest = try Self.contentManifestText(manifest)
         let plan = try manifest.files.map { ($0, try Self.destination(for: $0.path, in: documents, realRoot: realRoot)) }
         totalBytes = manifest.totalBytes
 
@@ -123,6 +127,11 @@ final class PortalContentImporter: ObservableObject {
             done += file.bytes
             completedBytes = done
         }
+        // Last, and only once every file was fetched or reused and verified: the
+        // launch gate then requires each listed file at its size. A failed or
+        // partial import never gets here and leaves any previous list untouched.
+        status = "Recording the imported file list"
+        try Self.writeContentManifest(gateManifest, documents: documents)
         let size = ByteCountFormatter.string(fromByteCount: done, countStyle: .file)
         status = "Imported \(fetched) files, reused \(reused) (\(size))"
     }
@@ -176,6 +185,48 @@ final class PortalContentImporter: ObservableObject {
         try Self.rejectLinks(dest,documents: documents)
         guard rename(staged.path, dest.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    // Names and byte sizes only, never hashes or contents: the header, then
+    // "<bytes>\t<path>" per file in the server's order.
+    nonisolated static func contentManifestText(_ manifest: PortalContentManifest) throws -> Data {
+        var text = contentManifestHeader + "\n"
+        for file in manifest.files {
+            try checkPath(file.path)
+            guard !file.path.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
+                throw PortalContentImportError.unsafePath(file.path)
+            }
+            text += "\(file.bytes)\t\(file.path)\n"
+        }
+        return Data(text.utf8)
+    }
+
+    // A new temporary file in Documents, synced, then renamed over any previous
+    // list: the gate never sees a partial list, nor a moment without one.
+    nonisolated static func writeContentManifest(_ data: Data, documents: URL) throws {
+        let destination = documents.appendingPathComponent(contentManifestName)
+        let temporary = documents.appendingPathComponent(".\(contentManifestName).\(UUID().uuidString).tmp")
+        try rejectLinks(destination,documents: documents)
+        try rejectLinks(temporary,documents: documents)
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var failure: Int32 = 0
+        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            var offset = 0
+            while offset < bytes.count, let base = bytes.baseAddress {
+                let wrote = write(fd, base + offset, bytes.count - offset)
+                if wrote < 0 && errno == EINTR { continue }
+                guard wrote > 0 else { failure = wrote < 0 ? errno : EIO; return }
+                offset += wrote
+            }
+        }
+        if failure == 0 && fsync(fd) != 0 { failure = errno }
+        if close(fd) != 0 && failure == 0 { failure = errno }
+        if failure == 0 && rename(temporary.path, destination.path) != 0 { failure = errno }
+        if failure != 0 {
+            unlink(temporary.path)
+            throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
         }
     }
 

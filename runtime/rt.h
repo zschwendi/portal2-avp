@@ -398,6 +398,7 @@ void rt_guest_poll(void);
 int rt_thread_shim(CPU *c, const char *name);
 void rt_thread_destructors(CPU *c);
 void rt_threads_destroy(void);
+int rt_threads_busy(void);   // live guest worker or attached host thread
 // Threads hôtes étrangers (thread audio SDL/CoreAudio...) appelant du code
 // invité : attach donne au thread courant un CPU invité (pile protégée, TCB,
 // TLS, errno), idempotent ; l'appelant encadre rt_invoke par

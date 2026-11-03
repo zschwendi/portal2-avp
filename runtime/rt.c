@@ -107,6 +107,14 @@ int rt_init(void) {
 
 void rt_native_destroy(void);   // native.c
 void rt_destroy(void) {
+    // After the engine returns, its worker threads (or a host thread attached
+    // for input/audio callbacks) may still be alive. Unmapping guest memory or
+    // TLS under them is unsafe, and aborting turned a normal engine exit into a
+    // crash report; leave the runtime mapped for the exiting process instead.
+    if (M && rt_threads_busy()) {
+        fputs("runtime left mapped at exit: guest workers or host threads still attached\n", stderr);
+        return;
+    }
     rt_shims_destroy();
     rt_native_destroy();
     if (M) munmap(M, (size_t)(address_space + guard_size));

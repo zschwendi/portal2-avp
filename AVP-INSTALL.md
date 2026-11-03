@@ -169,6 +169,15 @@ with a current receipt if the source expired. Transient connection failures
 retry the current file up to three times, with short cancellable delays; size,
 hash, path and HTTP failures still stop the import. A partially downloaded file
 starts again. There is no general game library/import UI yet.
+Only after every file is verified does the importer write
+`Documents/portal2-content-manifest.txt` (file names and sizes, no hashes); the
+launch gate then requires every listed file at exactly that size, loose maps
+included. Without that file (content copied another way) the gate checks the
+VPK archives and the first campaign map only. For a device whose content is
+already complete, write the list on the Mac with
+`python3 tools/serve_owned_content.py --write-content-manifest build/portal2-content-manifest.txt`
+(no hashing, no server) and copy it last to `Documents/portal2-content-manifest.txt`;
+`tools/ios_device.sh data` does this itself.
 The protocol and Swift importer pass fixture tests; physical import throughput
 and gameplay remain separate acceptance steps.
 

@@ -1,6 +1,8 @@
 """Owned-file LAN protocol and real Swift importer checks with tiny synthetic files."""
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -141,6 +143,11 @@ class OwnedContentTests(unittest.TestCase):
         self.assertEqual([b.read_bytes() for b in backups],[b'old asset'])
         self.assertEqual(list((docs/'Portal2 Import Staging').iterdir()),[])
         self.assertNotIn(token,result.stdout+result.stderr)
+        self.assertEqual((docs/server_api.CONTENT_MANIFEST_NAME).read_text(),self.expected_gate_manifest())
+
+    def expected_gate_manifest(self):
+        # The importer's launch-gate manifest equals the Mac tool's for the same roots.
+        return server_api.content_manifest_text(server_api.collect_files(self.roots))
 
     @unittest.skipUnless(os.uname().sysname=='Darwin','Swift Apple frameworks required')
     def test_real_swift_import_reuse_backup_and_symlink_rejection(self):
@@ -152,8 +159,16 @@ class OwnedContentTests(unittest.TestCase):
         save = docs/'portal2-userdata/save.sav'
         save.parent.mkdir()
         save.write_bytes(b'preserve save')
+        gate = docs/server_api.CONTENT_MANIFEST_NAME
+        gate.write_text('P2-CONTENT-MANIFEST 1\n9\tprep/stale\n')  # stale list from an older import
         result = subprocess.run([binary,self.url,docs],check=True,capture_output=True,text=True)
         self.assertIn('Imported 3 files',result.stdout)
+        self.assertEqual(gate.read_text(),self.expected_gate_manifest())
+        self.assertEqual(gate.read_text().splitlines()[1:],
+                         [f"{len(self.payloads[f['path']])}\t{f['path']}" for f in self.manifest['files']])
+        self.assertEqual(sorted(p.name for p in docs.iterdir()),
+                         sorted(['Portal2 Import Backups','Portal2 Import Staging','game','linux','prep',
+                                 'portal2-userdata',server_api.CONTENT_MANIFEST_NAME]))
         for name,data in self.payloads.items(): self.assertEqual((docs/name).read_bytes(),data)
         backups = list((docs/'Portal2 Import Backups').rglob('pak01_dir.vpk'))
         self.assertEqual(len(backups),1)
@@ -180,8 +195,93 @@ class OwnedContentTests(unittest.TestCase):
         corrupt['files'][0]['sha256'] = '0'*64
         _, table = server_api.build_manifest(server_api.collect_files(self.roots))
         self.server.RequestHandlerClass = server_api.make_handler(self.url.split('/')[-2],json.dumps(corrupt).encode(),table)
+        gate_before = gate.stat()
         result = subprocess.run([binary,self.url,docs],capture_output=True,text=True)
         self.assertNotEqual(result.returncode,0)
         self.assertIn('SHA-256',result.stderr)
         self.assertEqual(dest.read_bytes(),self.payloads['game/portal2/pak01_dir.vpk'])
         self.assertEqual(save.read_bytes(),b'preserve save')
+        # A failed import leaves the previous list untouched...
+        self.assertEqual((gate.stat().st_ino,gate.stat().st_mtime_ns),(gate_before.st_ino,gate_before.st_mtime_ns))
+        self.assertEqual(gate.read_text(),self.expected_gate_manifest())
+        # ...and a partial first import writes none.
+        fresh = self.root/'fresh-documents'
+        fresh.mkdir()
+        result = subprocess.run([binary,self.url,fresh],capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse((fresh/server_api.CONTENT_MANIFEST_NAME).exists())
+        self.assertEqual([p.name for p in fresh.iterdir() if p.name.endswith('.tmp')],[])
+        for failed in (bad_docs,aux_docs):
+            self.assertFalse((failed/server_api.CONTENT_MANIFEST_NAME).exists())
+
+
+class ContentManifestWriterTests(unittest.TestCase):
+    """--write-content-manifest: names and sizes only, atomic, no hashing and no server."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='p2-gate-manifest-')
+        self.root = Path(self.temp.name)
+        self.sources = self.root/'sources'
+        self.payloads = {'prep/layout.json': b'{}', 'linux/portal2_linux': b'fixture-linux',
+                         'game/portal2/pak01_dir.vpk': b'v'*300, 'game/portal2/maps/sp_a1_intro1.bsp': b'm'*1234,
+                         'game/portal2_dlc2/maps/mp_coop_x.bsp': b'', 'game/update/a b/c.txt': b'spaced'}
+        for name, data in self.payloads.items():
+            p = self.sources/name
+            p.parent.mkdir(parents=True,exist_ok=True)
+            p.write_bytes(data)
+        (self.sources/'game/portal2/.DS_Store').write_bytes(b'finder')
+        (self.sources/'game/sdk_content').mkdir()  # not an exported folder
+        (self.sources/'game/sdk_content/big.bin').write_bytes(b'not exported')
+        self.roots = server_api.source_roots(self.sources/'game', self.sources/'linux', self.sources/'prep')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_writes_sorted_names_and_sizes_atomically(self):
+        out = self.root/'out/portal2-content-manifest.txt'
+        out.parent.mkdir()
+        out.write_text('stale')
+        hashed = []
+        original = server_api.sha256_file
+        server_api.sha256_file = lambda path: hashed.append(path) or original(path)
+        try:
+            files, total = server_api.write_content_manifest(out, self.roots)
+        finally:
+            server_api.sha256_file = original
+        self.assertEqual(hashed, [])
+        self.assertEqual((files, total), (len(self.payloads), sum(map(len, self.payloads.values()))))
+        text = out.read_text()
+        self.assertTrue(text.endswith('\n'))
+        self.assertNotIn('\r', text)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], server_api.CONTENT_MANIFEST_HEADER)
+        expected = sorted(self.payloads)
+        self.assertEqual(lines[1:], [f'{len(self.payloads[name])}\t{name}' for name in expected])
+        self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ['portal2-content-manifest.txt'])
+        self.assertEqual(out.stat().st_mode & 0o777, 0o644)
+
+    def test_cli_writes_manifest_without_serving(self):
+        out = self.root/'cli/manifest.txt'
+        started = []
+        original = (server_api.load_local_roots, server_api.prepare)
+        server_api.load_local_roots = lambda: self.roots
+        server_api.prepare = lambda *args, **kwargs: started.append(1)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                server_api.main(['--write-content-manifest', str(out)])
+        finally:
+            server_api.load_local_roots, server_api.prepare = original
+        self.assertEqual(started, [])
+        self.assertIn(f'{len(self.payloads)} files', printed.getvalue())
+        self.assertEqual(out.read_text(), server_api.content_manifest_text(server_api.collect_files(self.roots)))
+
+    def test_unsafe_names_refused(self):
+        for name in ('bad\nname.txt', 'bad\rname.txt', 'bad\x7fname.txt'):
+            with self.subTest(name=name):
+                p = self.sources/'prep'/name
+                p.write_bytes(b'x')
+                with self.assertRaises(ValueError):
+                    server_api.write_content_manifest(self.root/'refused.txt', self.roots)
+                p.unlink()
+                self.assertFalse((self.root/'refused.txt').exists())
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name.endswith('.tmp')], [])

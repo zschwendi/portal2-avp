@@ -4,6 +4,10 @@
 Developer bootstrap only. Serves a fixed, precomputed file map under a random capability
 token: no directory listings, no writes, no path resolution from requests. The token URL
 is written only to the private --output receipt, never to stdout or request logs.
+
+With --write-content-manifest PATH it only writes the launch gate's content manifest
+(names and sizes of the owned files, runtime/content_check.h) and exits: no hashing,
+no server.
 """
 import argparse
 import errno
@@ -23,6 +27,8 @@ GAME_SUBDIRS = ("bin", "platform", "update", "portal2", "portal2_dlc1", "portal2
 CHUNK = 4 << 20
 SKIP_NAMES = {".DS_Store"}
 FILE_ROUTE = re.compile(r"file/([1-9][0-9]{0,8})")
+CONTENT_MANIFEST_HEADER = "P2-CONTENT-MANIFEST 1"  # runtime/content_check.h
+CONTENT_MANIFEST_NAME = "portal2-content-manifest.txt"
 RANGE = re.compile(r"bytes=([0-9]*)-([0-9]*)")
 
 
@@ -94,6 +100,39 @@ def build_manifest(files):
         entries.append({"id": file_id, "path": path, "bytes": size, "sha256": sha256_file(real)})
         table[file_id] = (real, size)
     return {"version": 1, "total_bytes": sum(e["bytes"] for e in entries), "files": entries}, table
+
+
+def content_manifest_text(files):
+    """Launch-gate manifest for [(manifest_path, real_path)]: header, then "<bytes>\t<path>" lines."""
+    lines = [CONTENT_MANIFEST_HEADER]
+    for path, real in files:
+        parts = path.split("/")
+        if (path.startswith("/") or any(part in ("", ".", "..") for part in parts)
+                or any(ord(c) < 0x20 or c in "\x7f\\" for c in path)):
+            raise ValueError(f"unsafe manifest path: {path!r}")
+        lines.append(f"{os.path.getsize(real)}\t{path}")
+    return "\n".join(lines) + "\n"
+
+
+def write_content_manifest(path, roots):
+    """Write the launch-gate manifest for the owned roots atomically; return (files, total_bytes)."""
+    files = collect_files(roots)
+    text = content_manifest_text(files)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    total = sum(int(line.split("\t", 1)[0]) for line in text.splitlines()[1:])
+    return len(files), total
 
 
 def make_handler(token, manifest_body, table):
@@ -266,7 +305,14 @@ def main(argv=None):
     parser.add_argument("--ttl", type=int, default=3600, help="seconds before the listener stops")
     parser.add_argument("--output", default=str(REPO / "build" / "owned_content_receipt.json"),
                         help="private receipt containing the token URL (mode 0600)")
+    parser.add_argument("--write-content-manifest", metavar="PATH",
+                        help=f"only write the launch-gate manifest (names and sizes, no hashing) to PATH and exit; "
+                             f"copy it last to Documents/{CONTENT_MANIFEST_NAME}")
     args = parser.parse_args(argv)
+    if args.write_content_manifest:
+        files, total = write_content_manifest(args.write_content_manifest, load_local_roots())
+        print(f"Wrote {args.write_content_manifest}: {files} files ({total} bytes)", flush=True)
+        return
     if args.ttl <= 0:
         parser.error("--ttl must be positive")
 

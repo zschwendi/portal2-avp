@@ -25,6 +25,10 @@ static NSString *size_text(int64_t bytes) {
     return [NSByteCountFormatter stringFromByteCount:bytes countStyle:NSByteCountFormatterCountStyleFile];
 }
 
+static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
+    return [NSNumberFormatter localizedStringFromNumber:@(count) numberStyle:NSNumberFormatterDecimalStyle];
+}
+
 @interface P2ContentGateController : UIViewController
 @property(nonatomic, readonly) BOOL passed;
 - (instancetype)initWithRoots:(const char *const *)roots;
@@ -33,6 +37,7 @@ static NSString *size_text(int64_t bytes) {
 
 @implementation P2ContentGateController {
     char *_roots[4];  // game, linux, prep, documents (copies; NULL: absente)
+    BOOL _documentsLayout;  // racines par défaut (Documents/game, linux, prep) : liste des fichiers vérifiée aussi
     P2ContentReport _report;
     UILabel *_title, *_detail, *_names, *_space, *_help, *_status;
     UIButton *_button;
@@ -40,8 +45,20 @@ static NSString *size_text(int64_t bytes) {
 }
 
 - (instancetype)initWithRoots:(const char *const *)roots {
-    if ((self = [super initWithNibName:nil bundle:nil]))
+    if ((self = [super initWithNibName:nil bundle:nil])) {
         for (int i = 0; i < 4; ++i) _roots[i] = roots[i] && *roots[i] ? strdup(roots[i]) : NULL;
+        // Sans --game-dir, --linux-root ni --images : le contenu copié dans
+        // Documents, vérifié aussi avec la liste Documents/portal2-content-manifest.txt
+        // (sans liste : la première carte de la campagne). Racines explicites
+        // (simulateur sur l'installation du Mac) : archives et fichiers requis seulement.
+        static const char *const names[3] = {"game", "linux", "prep"};
+        _documentsLayout = _roots[3] != NULL;
+        for (int i = 0; i < 3 && _documentsLayout; ++i) {
+            char expected[1024];
+            _documentsLayout = _roots[i] && snprintf(expected, sizeof(expected), "%s/%s", _roots[3], names[i]) <
+                               (int)sizeof(expected) && !strcmp(_roots[i], expected);
+        }
+    }
     return self;
 }
 
@@ -53,7 +70,8 @@ static NSString *size_text(int64_t bytes) {
 // Vérifie, ajoute l'espace du volume, écrit Documents/portal2-setup-status.json
 // (lu à distance par devicectl) et met l'écran à jour.
 - (BOOL)check:(const char *)trigger {
-    p2_content_check_roots(_roots[0], _roots[1], _roots[2], &_report);
+    if (_documentsLayout) p2_content_check(_roots[3], &_report);
+    else p2_content_check_roots(_roots[0], _roots[1], _roots[2], &_report);
     if (_roots[3]) {
         NSString *documents = [NSString stringWithUTF8String:_roots[3]];
         NSArray<NSURLResourceKey> *keys = @[NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeTotalCapacityKey];
@@ -79,10 +97,14 @@ static NSString *size_text(int64_t bytes) {
             fprintf(stderr, "[ios] %s non écrit : %s\n", P2_CONTENT_STATUS_FILE, strerror(errno));
     }
     fprintf(stderr, "[ios] contenu du jeu (%s) : %s ; %d requis manquants, %d/%d archives manquantes, %d tronquées, "
-            "%d index endommagés, ~%lld octets manquants, %lld µs%s%s\n", trigger,
+            "%d index endommagés, liste %s (%d/%d fichiers manquants, %d de taille différente), carte témoin %s, "
+            "~%lld octets manquants, %lld µs%s%s\n", trigger,
             _report.complete ? "complet" : "incomplet", _report.required_missing, _report.missing_archives,
-            _report.archives, _report.short_archives, _report.bad_directories, (long long)_report.missing_bytes,
-            (long long)_report.elapsed_us, _report.names ? " ; premier : " : "", p2_content_report_name(&_report, 0));
+            _report.archives, _report.short_archives, _report.bad_directories,
+            !_report.manifest ? "absente" : _report.manifest_bad ? "illisible" : "lue", _report.manifest_missing,
+            _report.manifest_files, _report.manifest_wrong_size, _report.maps_missing ? "manquante" : "présente ou non requise",
+            (long long)_report.missing_bytes, (long long)_report.elapsed_us, _report.names ? " ; premier : " : "",
+            p2_content_report_name(&_report, 0));
     _passed = _report.complete != 0;
     if (self.isViewLoaded) [self render];
     return _passed;
@@ -166,6 +188,31 @@ static NSString *size_text(int64_t bytes) {
         object:nil queue:nil usingBlock:^(NSNotification *note) { (void)note; [weak check:"foreground"]; }];
 }
 
+// Formulation des archives : sans liste des fichiers lisible, ou pour ce que
+// seule la vérification des archives voit.
+- (void)archiveParts:(NSMutableArray<NSString *> *)parts {
+    const P2ContentReport *r = &_report;
+    BOOL fr = french();
+    if (r->manifest_bad) [parts addObject:TEXT(@"la liste des fichiers du jeu (" P2_CONTENT_MANIFEST_FILE ") est illisible ou endommagée",
+                                               @"the game file list (" P2_CONTENT_MANIFEST_FILE ") is unreadable or damaged")];
+    int missing = r->missing_archives, cut = r->short_archives, bad = r->bad_directories, required = r->required_missing;
+    if (missing == 1) [parts addObject:[NSString stringWithFormat:TEXT(@"1 archive du jeu sur %d manque",
+                                                                      @"1 of %d game archives is missing"), r->archives]];
+    else if (missing) [parts addObject:[NSString stringWithFormat:TEXT(@"%d archives du jeu sur %d manquent",
+                                                                      @"%d of %d game archives are missing"), missing, r->archives]];
+    if (cut) [parts addObject:fr ?
+        (cut == 1 ? @"1 archive n’est copiée qu’en partie" : [NSString stringWithFormat:@"%d archives ne sont copiées qu’en partie", cut]) :
+        (cut == 1 ? @"1 archive is only partly copied" : [NSString stringWithFormat:@"%d archives are only partly copied", cut])];
+    if (bad) [parts addObject:fr ?
+        (bad == 1 ? @"1 index d’archives est endommagé ou tronqué" : [NSString stringWithFormat:@"%d index d’archives sont endommagés ou tronqués", bad]) :
+        (bad == 1 ? @"1 archive index is damaged or cut short" : [NSString stringWithFormat:@"%d archive indexes are damaged or cut short", bad])];
+    if (required) [parts addObject:fr ?
+        (required == 1 ? @"1 fichier requis manque" : [NSString stringWithFormat:@"%d fichiers requis manquent", required]) :
+        (required == 1 ? @"1 required file is missing" : [NSString stringWithFormat:@"%d required files are missing", required])];
+    if (r->maps_missing) [parts addObject:TEXT(@"les cartes de la campagne (game/portal2/maps) manquent",
+                                               @"the campaign maps (game/portal2/maps) are missing")];
+}
+
 - (void)render {
     const P2ContentReport *r = &_report;
     BOOL fr = french();
@@ -183,21 +230,23 @@ static NSString *size_text(int64_t bytes) {
                             @"Portal 2 runs from your own copy of the game: its content (game), the Linux depot "
                             @"files (linux) and the prepared images (prep).");
     } else {
-        int missing = r->missing_archives, cut = r->short_archives, bad = r->bad_directories, required = r->required_missing;
-        if (missing == 1) [parts addObject:[NSString stringWithFormat:TEXT(@"1 archive du jeu sur %d manque",
-                                                                          @"1 of %d game archives is missing"), r->archives]];
-        else if (missing) [parts addObject:[NSString stringWithFormat:TEXT(@"%d archives du jeu sur %d manquent",
-                                                                          @"%d of %d game archives are missing"), missing, r->archives]];
-        if (cut) [parts addObject:fr ?
-            (cut == 1 ? @"1 archive n’est copiée qu’en partie" : [NSString stringWithFormat:@"%d archives ne sont copiées qu’en partie", cut]) :
-            (cut == 1 ? @"1 archive is only partly copied" : [NSString stringWithFormat:@"%d archives are only partly copied", cut])];
-        if (bad) [parts addObject:fr ?
-            (bad == 1 ? @"1 index d’archives est endommagé ou tronqué" : [NSString stringWithFormat:@"%d index d’archives sont endommagés ou tronqués", bad]) :
-            (bad == 1 ? @"1 archive index is damaged or cut short" : [NSString stringWithFormat:@"%d archive indexes are damaged or cut short", bad])];
-        if (required) [parts addObject:fr ?
-            (required == 1 ? @"1 fichier requis manque" : [NSString stringWithFormat:@"%d fichiers requis manquent", required]) :
-            (required == 1 ? @"1 required file is missing" : [NSString stringWithFormat:@"%d required files are missing", required])];
+        // Avec la liste des fichiers de l'import : chaque fichier manquant (cartes comprises).
+        int listed = r->manifest && !r->manifest_bad ? r->manifest_missing : 0;
+        int differ = r->manifest && !r->manifest_bad ? r->manifest_wrong_size : 0;
+        if (listed == 1) [parts addObject:[NSString stringWithFormat:TEXT(@"1 fichier du jeu sur %@ manque",
+                                                                         @"1 of %@ game files is missing"), count_text(r->manifest_files)]];
+        else if (listed) [parts addObject:[NSString stringWithFormat:TEXT(@"%@ fichiers du jeu sur %@ manquent",
+                                                                         @"%@ of %@ game files are missing"),
+                                           count_text(listed), count_text(r->manifest_files)]];
+        if (differ) [parts addObject:fr ?
+            (differ == 1 ? @"1 fichier du jeu n’est copié qu’en partie ou diffère de celui du Mac" :
+                           [NSString stringWithFormat:@"%@ fichiers du jeu ne sont copiés qu’en partie ou diffèrent de ceux du Mac", count_text(differ)]) :
+            (differ == 1 ? @"1 game file is only partly copied or differs from your Mac’s copy" :
+                           [NSString stringWithFormat:@"%@ game files are only partly copied or differ from your Mac’s copies", count_text(differ)])];
+        // Sans liste lisible, ou ce que seule la vérification des archives voit.
+        if (!parts.count) [self archiveParts:parts];
         NSString *text = [parts componentsJoinedByString:fr ? @" ; " : @"; "];
+        if (text.length) text = [[text substringToIndex:1].uppercaseString stringByAppendingString:[text substringFromIndex:1]];
         if (r->missing_bytes > 0)
             text = [text stringByAppendingFormat:fr ? @", environ %@" : @", about %@", size_text(r->missing_bytes)];
         _detail.text = [text stringByAppendingString:@"."];
@@ -205,7 +254,10 @@ static NSString *size_text(int64_t bytes) {
 
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (int i = 0; i < r->names; ++i) [names addObject:@(p2_content_report_name(r, i))];
-    int problems = r->required_missing + r->bad_directories + r->missing_archives + r->short_archives;
+    // Une archive manquante est aussi un fichier manquant de la liste : comptée une fois.
+    int archive_problems = r->required_missing + r->bad_directories + r->missing_archives + r->short_archives;
+    int listed_problems = r->manifest && !r->manifest_bad ? r->manifest_missing + r->manifest_wrong_size : 0;
+    int problems = (archive_problems > listed_problems ? archive_problems : listed_problems) + r->manifest_bad + r->maps_missing;
     _names.text = names.count ? [NSString stringWithFormat:@"%@%@%@", TEXT(@"Manquants ou endommagés : ", @"Missing or damaged: "),
                                  [names componentsJoinedByString:@", "], problems > (int)names.count ? @", …" : @""] : nil;
     _names.hidden = names.count == 0;

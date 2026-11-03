@@ -143,6 +143,10 @@ struct PortalGameView: View {
 struct PortalContentSetup: Equatable, Sendable {
     var complete = false
     var requiredMissing = 0, badDirectories = 0, archives = 0, missingArchives = 0, shortArchives = 0
+    // The import's list of every owned file (absent: content copied another
+    // way; then the first campaign map stands in for the loose files).
+    var manifest = false, manifestBad = false, mapsMissing = false
+    var manifestFiles = 0, manifestMissing = 0, manifestWrongSize = 0
     var missingBytes: Int64 = 0
     var available: Int64?, total: Int64?
     var names: [String] = []
@@ -157,6 +161,12 @@ struct PortalContentSetup: Equatable, Sendable {
         archives = Int(report.archives)
         missingArchives = Int(report.missing_archives)
         shortArchives = Int(report.short_archives)
+        manifest = report.manifest != 0
+        manifestBad = report.manifest_bad != 0
+        mapsMissing = report.maps_missing != 0
+        manifestFiles = Int(report.manifest_files)
+        manifestMissing = Int(report.manifest_missing)
+        manifestWrongSize = Int(report.manifest_wrong_size)
         missingBytes = max(report.missing_bytes, 0)
         available = report.volume_available >= 0 ? report.volume_available : nil
         total = report.volume_total >= 0 ? report.volume_total : nil
@@ -182,7 +192,13 @@ struct PortalContentSetup: Equatable, Sendable {
 
     private static func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     private var nothingImported: Bool { requiredMissing >= 3 }
-    var moreNames: Bool { requiredMissing + badDirectories + missingArchives + shortArchives > names.count }
+    // With a readable list, a missing archive is also one of its missing files: count it once.
+    private var problems: Int {
+        let archive = requiredMissing + badDirectories + missingArchives + shortArchives
+        let listed = manifest && !manifestBad ? manifestMissing + manifestWrongSize : 0
+        return max(archive, listed) + (manifestBad ? 1 : 0) + (mapsMissing ? 1 : 0)
+    }
+    var moreNames: Bool { problems > names.count }
     var spaceShort: Bool { available.map { missingBytes > 0 && $0 < missingBytes } ?? false }
 
     var title: String {
@@ -194,13 +210,34 @@ struct PortalContentSetup: Equatable, Sendable {
         if complete { return "Your Portal 2 files are complete." }
         return nothingImported ? "Import your Portal 2 files to play." : "Portal 2 can\u{2019}t start until its game files are complete."
     }
-    // e.g. "112 of 148 game archives are missing, about 3.4 GB."
+    // e.g. "412 of 3,592 game files are missing, about 2.7 GB." (with the
+    // import's file list) or "112 of 148 game archives are missing, about 3.4 GB."
     var detail: String {
         if complete { return "The files already on this Vision Pro are complete, so Portal 2 can start." }
         if nothingImported {
             return "Portal 2 runs from your own copy of the game: its content, the Linux depot files and the prepared images."
         }
         var parts: [String] = []
+        if manifest && !manifestBad {
+            if manifestMissing > 0 {
+                parts.append(manifestMissing == 1 ? "1 of \(manifestFiles.formatted()) game files is missing"
+                             : "\(manifestMissing.formatted()) of \(manifestFiles.formatted()) game files are missing")
+            }
+            if manifestWrongSize > 0 {
+                parts.append(manifestWrongSize == 1 ? "1 game file is only partly copied or differs from your Mac\u{2019}s copy"
+                             : "\(manifestWrongSize.formatted()) game files are only partly copied or differ from your Mac\u{2019}s copies")
+            }
+        }
+        // Archive wording: no list, an unreadable one, or what only the archive check sees.
+        if parts.isEmpty { parts = archiveParts }
+        var text = parts.joined(separator: "; ")
+        text = text.prefix(1).uppercased() + text.dropFirst()
+        if missingBytes > 0 { text += ", about \(Self.size(missingBytes))" }
+        return text + "."
+    }
+    private var archiveParts: [String] {
+        var parts: [String] = []
+        if manifestBad { parts.append("the list of game files (\(PortalContentImporter.contentManifestName)) is unreadable or damaged") }
         if missingArchives > 0 { parts.append("\(missingArchives) of \(archives) game archives are missing") }
         if shortArchives > 0 {
             parts.append(shortArchives == 1 ? "1 archive is only partly copied" : "\(shortArchives) archives are only partly copied")
@@ -211,9 +248,8 @@ struct PortalContentSetup: Equatable, Sendable {
         if requiredMissing > 0 {
             parts.append(requiredMissing == 1 ? "1 required file is missing" : "\(requiredMissing) required files are missing")
         }
-        var text = parts.joined(separator: "; ")
-        if missingBytes > 0 { text += ", about \(Self.size(missingBytes))" }
-        return text + "."
+        if mapsMissing { parts.append("the campaign maps (game/portal2/maps) are missing") }
+        return parts
     }
     var space: String {
         guard let available else { return missingBytes > 0 ? "About \(Self.size(missingBytes)) more is needed." : "" }

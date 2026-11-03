@@ -75,9 +75,13 @@ static int content_check(NSString *documents, P2ContentReport *report) {
     os_unfair_lock_unlock(&report_lock);
     if (!report->complete)
         NSLog(@"[vision-game] Owned content incomplete: %d required file(s) missing, %d of %d archives missing, "
-              "%d short, %d bad index(es), about %lld bytes missing; first: %s",
+              "%d short, %d bad index(es), manifest %s (%d of %d listed files missing, %d wrong size), "
+              "sentinel map %s, about %lld bytes missing; first: %s",
               report->required_missing, report->missing_archives, report->archives, report->short_archives,
-              report->bad_directories, (long long)report->missing_bytes, p2_content_report_name(report, 0));
+              report->bad_directories, !report->manifest ? "absent" : report->manifest_bad ? "unreadable" : "read",
+              report->manifest_missing, report->manifest_files, report->manifest_wrong_size,
+              report->maps_missing ? "missing" : "present or not needed", (long long)report->missing_bytes,
+              p2_content_report_name(report, 0));
     return report->complete;
 }
 
