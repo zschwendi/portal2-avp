@@ -82,7 +82,7 @@ The setting titles below are the ones shown in the app, which is still in French
 | Tapes au dos (Back taps) | `P2_BACKTAP` | enabled by default |
 | Sensibilité des tapes (Tap sensitivity) | `P2_BACKTAP_SENSITIVITY` | 0.75 / 1 / 1.33: thresholds are divided by this value |
 | Inverser gauche et droite (Swap left and right) | `P2_BACKTAP_INVERT` | |
-| Boutons de portail (Portal buttons) | `P2_PORTAL_BUTTONS` | automatic (when back taps are off), always, never |
+| Boutons de portail (Portal buttons) | `P2_PORTAL_BUTTONS` | automatic (always on iPad; on iPhone when back taps are off), always, never |
 | Journal (Log) | `P2_LOG_FILE=Documents/game.log` | |
 
 Simulator: `xcrun simctl spawn <device> defaults write <bundle id>
@@ -116,8 +116,8 @@ Holding the phone in landscape, tapping the back near the left edge with an
 index finger fires the blue portal, near the right edge the orange one
 (`runtime/ios/back_tap.c`, tested by `tests/checks_back_tap.c`; CoreMotion in
 `touch_controls.m`, on a dedicated queue, no permission required). Back taps
-replace the overlay's portal buttons, which only come back without a motion
-sensor (simulator) or with `P2_BACKTAP=0`. A candidate opens at half the
+replace the overlay's portal buttons on iPhone, which only come back without a motion
+sensor (simulator) or with `P2_BACKTAP=0`; iPad always shows them by default. A candidate opens at half the
 thresholds: |user acceleration| and its sample-to-sample change (jerk), or a
 sudden change in rotation around x; it is judged 100 ms later against the full
 thresholds. Two paths: acceleration (0.10 g, 6 g/s) or gyroscope (0.06 g,
@@ -213,4 +213,10 @@ Profile with `P2_PROFILE_RAW=1` before guessing.
 - SDL never sees the game "capture" the mouse: the menu/gameplay state comes from the
   engine (`IEngineVGui::IsGameUIVisible`, `runtime/ios/game_state.c`).
 - Touch controls: a UIKit view placed on top of the window and force-drawn
-  (SDL's loop never commits UIKit transactions).
+  (SDL's loop never commits UIKit transactions). Finger ownership, layout and
+  held state live in `runtime/ios/touch_router.c` (host-tested by
+  `tests/checks_touch_router.c`, run alone by `tests/test_ios_touch_router.py`):
+  everything held is released when the game UI opens, a controller or keyboard
+  connects or disconnects, the app resigns active, or the layout changes
+  (landscape flip, safe area); a finger still resting on a button afterwards
+  never fires again until lifted.

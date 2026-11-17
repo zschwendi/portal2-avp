@@ -26,7 +26,13 @@
 //   docs/ios.md).
 // Avec une manette ou un clavier connecté, elle se cache jusqu'au premier
 // toucher ; avec une vraie manette, la manette virtuelle est retirée pour que
-// le jeu ne lise qu'elle. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
+// le jeu ne lise qu'elle.
+// La propriété des doigts, la disposition et l'état tenu sont dans
+// touch_router.c (testé sur l'hôte) : tout ce qui est tenu est relâché à
+// l'ouverture d'un menu, à la connexion d'une manette ou d'un clavier, au
+// départ en arrière-plan et à chaque nouvelle disposition (rotation, zone
+// sûre) ; un doigt resté posé ne retire pas ensuite. Les événements SDL sont
+// poussés sur le thread principal, celui du jeu. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
 // de la caméra (1 par défaut, stick et trackpad).
 //
 // Disposition et dessin inspirés de la manette tactile de TOTK de
@@ -46,6 +52,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "back_tap.h"
+#include "touch_router.h"
 
 int rt_ios_game_ui_visible(void);   // game_state.c
 extern unsigned long rt_ios_frames;  // gl_ios.m : images présentées
@@ -53,10 +60,6 @@ void rt_ios_move_response_linear(int on);
 int rt_ios_move_response(void);
 void rt_ios_console_command(const char *name);   // game_state.c
 
-typedef enum { ROLE_MOVE, ROLE_LOOK, ROLE_BUTTON } Role;
-typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, LOOK_MODE, ACTION_COUNT } Action;
-typedef struct { Action action; NSString *symbol; UIColor *color; CGPoint at; CGFloat size; } Button;
-enum { MAX_BUTTONS = 10 };
 
 // Manette virtuelle : deux axes seulement (stick gauche), aucun bouton, pour
 // qu'elle ne porte aucune autre commande que le déplacement.
@@ -81,40 +84,31 @@ static void remove_virtual_pad(SDL_Joystick *pad) {
     fprintf(stderr, "[ios] manette virtuelle retirée\n");
 }
 
-static const CGFloat kButtonSize = 54, kPortalSize = 60;
-static const float kStickLook = 90;      // comptes de souris par image, stick à fond (≈ 360°/s à la sensibilité 3 du jeu)
-static const float kTrackpadLook = 3.5f; // comptes de souris par point de glissement
+static const CGFloat kKnobSize = 54;
 static NSString *const kTrackpadKey = @"P2TouchTrackpad";
-static float look_speed(void) {
-    static float speed;
-    if (!speed) { const char *e = getenv("P2_TOUCH_LOOK"); speed = e && atof(e) > 0 ? (float)atof(e) : 1.0f; }
-    return speed;
-}
 
-// Accélération du trackpad : gain 1 sous P2_TOUCH_ACCEL_LOW pt/s (visée fine
-// inchangée), puis montée en douceur (smoothstep) jusqu'à P2_TOUCH_ACCEL
-// (multiplicateur maximal) à P2_TOUCH_ACCEL_HIGH pt/s. P2_TOUCH_ACCEL=1 la coupe.
-// La vitesse du doigt est lissée par moyenne exponentielle (P2_TOUCH_ACCEL_SMOOTH,
-// poids du nouvel échantillon) pour qu'un échantillon isolé ne fasse pas sauter le gain.
 static float env_float(const char *name, float def, float min) {
     const char *e = getenv(name); return e && atof(e) >= min ? (float)atof(e) : def;
 }
-static struct { float max, low, high, smooth; int log; } accel;
-static float trackpad_gain(double speed);
-static void accel_init(void) {
-    if (accel.max) return;
-    accel.max = env_float("P2_TOUCH_ACCEL", 2.5f, 1);
-    accel.low = env_float("P2_TOUCH_ACCEL_LOW", 300, 0);
-    accel.high = env_float("P2_TOUCH_ACCEL_HIGH", 1500, accel.low + 1);
-    if (accel.high <= accel.low) accel.high = accel.low + 1;
-    accel.smooth = fminf(1, env_float("P2_TOUCH_ACCEL_SMOOTH", 0.5f, 0.01f));
-    accel.log = getenv("P2_TOUCH_ACCEL_LOG") != NULL;
+// P2_TOUCH_LOOK : vitesse de la caméra. Accélération du trackpad : gain 1 sous
+// P2_TOUCH_ACCEL_LOW pt/s (visée fine inchangée), puis montée en douceur
+// jusqu'à P2_TOUCH_ACCEL (multiplicateur maximal) à P2_TOUCH_ACCEL_HIGH pt/s ;
+// vitesse du doigt lissée (P2_TOUCH_ACCEL_SMOOTH, poids du nouvel
+// échantillon). P2_TOUCH_ACCEL=1 la coupe.
+static rt_touch_tuning touch_tuning(void) {
+    rt_touch_tuning t;
+    rt_touch_tuning_defaults(&t);
+    t.look_speed = env_float("P2_TOUCH_LOOK", t.look_speed, 0.01f);
+    t.accel_max = env_float("P2_TOUCH_ACCEL", t.accel_max, 1);
+    t.accel_low = env_float("P2_TOUCH_ACCEL_LOW", t.accel_low, 0);
+    t.accel_high = env_float("P2_TOUCH_ACCEL_HIGH", t.accel_high, t.accel_low + 1);
+    if (t.accel_high <= t.accel_low) t.accel_high = t.accel_low + 1;
+    t.accel_smooth = fminf(1, env_float("P2_TOUCH_ACCEL_SMOOTH", t.accel_smooth, 0.01f));
+    t.log = getenv("P2_TOUCH_ACCEL_LOG") != NULL;
     fprintf(stderr, "[ios] trackpad : gain %.2f à %g pt/s, %.2f à %g, %.2f à %g, %.2f à 3000 pt/s\n",
-        trackpad_gain(100), 100.0, trackpad_gain(600), 600.0, trackpad_gain(1000), 1000.0, trackpad_gain(3000));
-}
-static float trackpad_gain(double speed) {
-    double t = fmin(1, fmax(0, (speed - accel.low) / (accel.high - accel.low)));
-    return 1 + (accel.max - 1) * (float)(t * t * (3 - 2 * t));
+        rt_touch_trackpad_gain(&t, 100), 100.0, rt_touch_trackpad_gain(&t, 600), 600.0,
+        rt_touch_trackpad_gain(&t, 1000), 1000.0, rt_touch_trackpad_gain(&t, 3000));
+    return t;
 }
 
 // La boucle de SDL (CFRunLoopRunInMode à délai nul) ne laisse jamais UIKit
@@ -275,29 +269,30 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     os_unfair_lock_unlock(&backtap_lock);
 }
 
-// Doigt suivi : rôle, action (bouton), point de départ, dernier point.
-@interface P2Finger : NSObject
-@property Role role; @property Action action; @property CGPoint start, at;
-@property NSTimeInterval stamp; @property double speed;   // trackpad : horodatage, vitesse lissée (pt/s)
-@end
-@implementation P2Finger
-@end
-
 @interface P2TouchControls : UIView
 - (instancetype)initWithWindow:(SDL_Window *)window;
+- (void)sendAction:(rt_touch_action)action down:(BOOL)down;
+- (void)lookBy:(int)dx y:(int)dy;
+- (void)updateMove;
+- (void)lookModeChanged:(BOOL)trackpad;
 @end
+
+// Sorties du routeur, sur le thread principal (doigts, minuterie, notifications).
+static void sink_action(void *ctx, rt_touch_action action, int down) {
+    [(__bridge P2TouchControls *)ctx sendAction:action down:down != 0];
+}
+static void sink_look(void *ctx, int dx, int dy) { [(__bridge P2TouchControls *)ctx lookBy:dx y:dy]; }
+static void sink_move(void *ctx, float x, float y) { (void)x; (void)y; [(__bridge P2TouchControls *)ctx updateMove]; }
+static void sink_look_mode(void *ctx, int trackpad) { [(__bridge P2TouchControls *)ctx lookModeChanged:trackpad != 0]; }
 
 @implementation P2TouchControls {
     SDL_Window *window;
-    NSMapTable<UITouch *, P2Finger *> *fingers;
-    int held[ACTION_COUNT];   // nombre de doigts par action
+    rt_touch_router router;   // doigts, disposition, état tenu (touch_router.c)
     BOOL wasd[4];             // W, A, S, D enfoncées
-    BOOL concealed;           // cachée pour une manette ou un clavier
-    BOOL menu;                // interface du jeu affichée : surcouche effacée
+    BOOL devices;             // manette ou clavier présents (dernier état connu)
     NSTimer *tick;            // caméra : un pas par image tant que le stick est incliné
-    float lookCarry[2];       // fractions de comptes de souris reportées
-    BOOL trackpad;            // moitié droite en trackpad plutôt qu'en stick
     BOOL physicalPad;         // vraie manette connectée
+    BOOL isPad;               // iPad : boutons de portail par défaut
     int fps;                  // compteur d'images affiché (0 : rien à afficher)
     int fpsHidden;            // masqué : P2_SHOW_FPS=0 (Réglages) ou toucher du coin haut gauche
     unsigned long fpsFrames;  // images au dernier relevé
@@ -309,7 +304,7 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     CGFloat testMove;         // essai : inclinaison avant imposée (P2_TOUCH_TEST_MOVE)
     Uint64 testNext;          // essai : prochaine étape (ms de SDL)
     int testPhase;            // essai : étape en cours
-    int backtapHeld;          // tape au dos : bouton enfoncé (Action), -1 aucun
+    int backtapHeld;          // tape au dos : action tenue (rt_touch_action), -1 aucune
     CFTimeInterval backtapAt; // tape au dos : instant de l'appui
     unsigned long backtapFrames; // tape au dos : images présentées à l'appui
 }
@@ -319,17 +314,25 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
         window = sdlWindow;
         self.multipleTouchEnabled = YES; self.backgroundColor = UIColor.clearColor; self.opaque = NO;
         self.contentMode = UIViewContentModeRedraw;
-        fingers = [NSMapTable strongToStrongObjectsMapTable];
-        trackpad = [NSUserDefaults.standardUserDefaults boolForKey:kTrackpadKey];
+        isPad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+        rt_touch_tuning tuning = touch_tuning();
+        rt_touch_sink sink = {(__bridge void *)self, sink_action, sink_look, sink_move, sink_look_mode};
+        rt_touch_init(&router, &tuning, &sink, [NSUserDefaults.standardUserDefaults boolForKey:kTrackpadKey]);
+        router.menu = rt_ios_game_ui_visible() != 0;
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         for (NSNotificationName name in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
                                           GCKeyboardDidConnectNotification, GCKeyboardDidDisconnectNotification])
             [center addObserver:self selector:@selector(devicesChanged) name:name object:nil];
-        [self devicesChanged];
+        // Appel, Centre de contrôle, arrière-plan : rien ne reste tenu.
+        for (NSNotificationName name in @[UIApplicationWillResignActiveNotification,
+                                          UIApplicationDidEnterBackgroundNotification])
+            [center addObserver:self selector:@selector(resignActive) name:name object:nil];
+        [center addObserver:self selector:@selector(becomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
         backtapHeld = -1;
         const char *show = getenv("P2_SHOW_FPS");   // posée par les Réglages (runtime/ios/settings.c)
         fpsHidden = show && !strcmp(show, "0");
         backtap_start();
+        [self devicesChanged];
         __weak P2TouchControls *weakSelf = self;
         tick = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
             (void)timer; [weakSelf step];
@@ -346,7 +349,33 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     BOOL any = gamepad || GCKeyboard.coalescedKeyboard != nil;
     const char *force = getenv("P2_TOUCH_CONTROLS");   // 1 : jamais cachée (essais sur simulateur)
     if (force && *force == '1') any = NO;
-    if (any != concealed) { concealed = any; redraw(self); }
+    if (any == devices) return;
+    // Connexion : cachée, tout relâché (la manette prend la main). Déconnexion :
+    // affichée, sans rien de tenu ; un toucher la rappelle aussi.
+    devices = any;
+    [self releaseAll];
+    rt_touch_set_hidden(&router, any);
+    redraw(self);
+}
+- (void)resignActive {
+    rt_touch_set_active(&router, 0);
+    [self backTapRelease:YES];
+    redraw(self);
+}
+- (void)becomeActive {
+    rt_touch_set_active(&router, 1);   // doigts neufs seulement
+    redraw(self);
+}
+
+// Disposition dans la zone sûre de la vue (encoche, coins arrondis, indicateur).
+- (CGRect)area { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
+- (rt_touch_layout)currentLayout {
+    CGRect b = self.bounds, a = self.area;
+    rt_touch_layout l;
+    rt_touch_layout_make(&l, (rt_touch_rect){(float)b.origin.x, (float)b.origin.y, (float)b.size.width, (float)b.size.height},
+                         (rt_touch_rect){(float)a.origin.x, (float)a.origin.y, (float)a.size.width, (float)a.size.height},
+                         rt_touch_portal_buttons(getenv("P2_PORTAL_BUTTONS"), isPad, backtap_motion != nil));
+    return l;
 }
 
 // À chaque image : rester devant la vue OpenGL de SDL (ajoutée après la
@@ -354,9 +383,9 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
 - (void)step {
     UIView *host = self.superview;
     BOOL ui = rt_ios_game_ui_visible() != 0;
-    if (ui != menu) {
-        menu = ui;
-        if (menu) [self releaseAll];
+    if (ui != router.menu) {
+        if (ui) [self backTapRelease:YES];
+        rt_touch_set_menu(&router, ui);   // menu : tout relâché, doigts à SDL
         redraw(self);
     }
     [self updateFPS];
@@ -366,20 +395,12 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     [self backTapStep];
     if (host.subviews.lastObject != self) [host bringSubviewToFront:self];
     if (!CGRectEqualToRect(self.frame, host.bounds)) { self.frame = host.bounds; redraw(self); }
-    if (trackpad) return;   // trackpad : mouvements envoyés au glissement (touchesMoved)
-    for (P2Finger *f in fingers.objectEnumerator) {
-        if (f.role != ROLE_LOOK) continue;
-        CGFloat x, y; [self deflectionOf:f x:&x y:&y];
-        float scale = kStickLook * look_speed();   // quadratique : lent près du centre pour viser
-        [self lookBy:(float)(x * fabs(x)) * scale y:(float)(-y * fabs(y)) * scale];
-    }
+    rt_touch_layout layout = [self currentLayout];
+    if (rt_touch_set_layout(&router, &layout)) { [self backTapRelease:YES]; redraw(self); }
+    rt_touch_frame(&router);
 }
-// Mouvement de souris relatif, fractions de comptes reportées.
-- (void)lookBy:(float)x y:(float)y {
-    lookCarry[0] += x; lookCarry[1] += y;
-    int dx = (int)lookCarry[0], dy = (int)lookCarry[1];
-    lookCarry[0] -= (float)dx; lookCarry[1] -= (float)dy;
-    if (!dx && !dy) return;
+// Mouvement de souris relatif (comptes entiers ; fractions reportées par le routeur).
+- (void)lookBy:(int)dx y:(int)dy {
     SDL_Event e = {0};
     e.type = SDL_MOUSEMOTION; e.motion.windowID = SDL_GetWindowID(window);
     e.motion.xrel = dx; e.motion.yrel = dy;
@@ -387,18 +408,19 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
 }
 // Tape au dos acceptée : appui, puis relâchement après P2_BACKTAP_HOLD et au
 // moins deux images (vgui ignore un clic dont l'appui et le relâchement
-// tombent dans la même image). Passe par action: comme un bouton tenu : si un
-// doigt tient déjà ce portail, rien n'est renvoyé au jeu.
+// tombent dans la même image). Passe par le routeur comme un appui tenu : si
+// un doigt tient déjà ce portail, rien n'est renvoyé au jeu.
 - (void)backTapStep {
     if (!backtap_motion) return;
     UIInterfaceOrientation o = self.window.windowScene.interfaceOrientation;
     atomic_store(&backtap_orient, o == UIInterfaceOrientationLandscapeLeft ? 1 : o == UIInterfaceOrientationLandscapeRight ? -1 : 0);
-    atomic_store(&backtap_active, !menu && !concealed);
+    BOOL live = !router.menu && !router.hidden && router.active;
+    atomic_store(&backtap_active, live);
     int side = atomic_exchange(&backtap_pending, 0);
-    if (side && !menu && !concealed && backtapHeld < 0) {
-        backtapHeld = side < 0 ? MOUSE_LEFT : MOUSE_RIGHT;
+    if (side && live && backtapHeld < 0) {
+        backtapHeld = side < 0 ? RT_TOUCH_FIRE_BLUE : RT_TOUCH_FIRE_ORANGE;
         backtapAt = CACurrentMediaTime(); backtapFrames = rt_ios_frames;
-        [self action:(Action)backtapHeld down:YES];
+        rt_touch_external(&router, (rt_touch_action)backtapHeld, 1);
         redraw(self);   // le bouton du portail s'allume
     }
     [self backTapRelease:NO];
@@ -406,25 +428,22 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
 - (void)backTapRelease:(BOOL)now {
     if (backtapHeld < 0) return;
     if (!now && (CACurrentMediaTime() - backtapAt < backtap_hold || rt_ios_frames < backtapFrames + 2)) return;
-    [self action:(Action)backtapHeld down:NO];
+    rt_touch_external(&router, (rt_touch_action)backtapHeld, 0);   // déjà relâché par une annulation : sans effet
     backtapHeld = -1;
     redraw(self);
 }
-- (void)toggleLookMode {
-    trackpad = !trackpad;
+- (void)lookModeChanged:(BOOL)trackpad {
     [NSUserDefaults.standardUserDefaults setBool:trackpad forKey:kTrackpadKey];
-    lookCarry[0] = lookCarry[1] = 0;
+    redraw(self);
 }
 
 // Hors partie, les doigts passent à la vue de SDL (clics dans les menus).
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    return menu ? nil : [super hitTest:point withEvent:event];
+    return rt_touch_takes_touches(&router) ? [super hitTest:point withEvent:event] : nil;
 }
 - (void)releaseAll {
-    for (P2Finger *f in fingers.objectEnumerator) if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
+    rt_touch_cancel_all(&router);
     [self backTapRelease:YES];
-    [fingers removeAllObjects];
-    [self updateMove];
 }
 
 // ---- événements SDL ----
@@ -444,19 +463,17 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     e.button.x = (Sint32)p.x; e.button.y = (Sint32)p.y;
     SDL_PushEvent(&e);
 }
-- (void)action:(Action)action down:(BOOL)down {
-    int before = held[action];
-    held[action] = MAX(0, held[action] + (down ? 1 : -1));
-    if ((before > 0) == (held[action] > 0)) return;
+// Transitions seulement (le routeur compte les doigts) : commandes par défaut
+// du jeu, sans toucher aux liaisons du joueur.
+- (void)sendAction:(rt_touch_action)action down:(BOOL)down {
     CGPoint centre = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
     switch (action) {
-    case KEY_SPACE: [self key:SDL_SCANCODE_SPACE down:down]; break;
-    case KEY_CTRL: [self key:SDL_SCANCODE_LCTRL down:down]; break;
-    case KEY_E: [self key:SDL_SCANCODE_E down:down]; break;
-    case KEY_ESCAPE: [self key:SDL_SCANCODE_ESCAPE down:down]; break;
-    case MOUSE_LEFT: [self mouseButton:SDL_BUTTON_LEFT down:down at:centre]; break;
-    case MOUSE_RIGHT: [self mouseButton:SDL_BUTTON_RIGHT down:down at:centre]; break;
-    case LOOK_MODE: if (down) [self toggleLookMode]; break;
+    case RT_TOUCH_JUMP: [self key:SDL_SCANCODE_SPACE down:down]; break;
+    case RT_TOUCH_CROUCH: [self key:SDL_SCANCODE_LCTRL down:down]; break;
+    case RT_TOUCH_USE: [self key:SDL_SCANCODE_E down:down]; break;
+    case RT_TOUCH_PAUSE: [self key:SDL_SCANCODE_ESCAPE down:down]; break;
+    case RT_TOUCH_FIRE_BLUE: [self mouseButton:SDL_BUTTON_LEFT down:down at:centre]; break;
+    case RT_TOUCH_FIRE_ORANGE: [self mouseButton:SDL_BUTTON_RIGHT down:down at:centre]; break;
     default: break;
     }
 }
@@ -466,76 +483,12 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
         if (wanted[i] != wasd[i]) { wasd[i] = wanted[i]; [self key:codes[i] down:wanted[i]]; }
 }
 
-// ---- disposition (points, dans la zone sûre) ----
-- (CGRect)area { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
-- (CGFloat)stickRadius { return MIN(66, self.area.size.height * .15); }
-- (CGPoint)restingStick:(BOOL)right {
-    CGRect a = self.area;
-    return CGPointMake(CGRectGetMinX(a) + a.size.width * (right ? .80 : .16), CGRectGetMinY(a) + a.size.height * .72);
-}
-static BOOL portal_buttons(void) {
-    const char *e = getenv("P2_PORTAL_BUTTONS");
-    if (e && *e == '1') return YES;
-    if (e && *e == '0') return NO;
-    return backtap_motion == nil;
-}
-- (int)buttons:(Button *)b {
-    CGRect a = self.area; CGFloat x = CGRectGetMinX(a), y = CGRectGetMinY(a), w = a.size.width, h = a.size.height;
-    UIColor *blue = [UIColor colorWithRed:.16 green:.55 blue:1 alpha:.6], *orange = [UIColor colorWithRed:1 green:.55 blue:.05 alpha:.6];
-    UIColor *ink = [UIColor colorWithWhite:0 alpha:.35];   // fond sombre : icônes lisibles sur un mur clair
-    CGFloat top = y + h * .19, gap = kPortalSize * 1.15;   // sous le compteur d'images
-    Button all[] = {
-        // Portails, en miroir : bleu à l'extérieur, orange à l'intérieur, des deux côtés.
-        {MOUSE_LEFT, nil, blue, {x + w * .06, top}, kPortalSize}, {MOUSE_RIGHT, nil, orange, {x + w * .06 + gap, top}, kPortalSize},
-        {MOUSE_LEFT, nil, blue, {x + w * .94, top}, kPortalSize}, {MOUSE_RIGHT, nil, orange, {x + w * .94 - gap, top}, kPortalSize},
-        {KEY_SPACE, @"arrow.up", ink, {x + w * .94, y + h * .50}, kButtonSize},
-        {KEY_CTRL, @"arrow.down", ink, {x + w * .80, y + h * .40}, kButtonSize},
-        {KEY_E, @"hand.point.up.left.fill", ink, {x + w * .94, y + h * .80}, kButtonSize},
-        {KEY_ESCAPE, @"pause.fill", ink, {x + w - kButtonSize * .45, y + kButtonSize * .45}, kButtonSize * .75},
-        // Mode de la caméra, dans le coin en bas à gauche : l'icône montre le mode actuel.
-        {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink,
-         {x + kButtonSize * .45, y + h - kButtonSize * .45}, kButtonSize * .75},
-    };
-    int n = 0;
-    for (int i = 0; i < (int)(sizeof(all) / sizeof(*all)) && n < MAX_BUTTONS; ++i) {
-        // Les tapes au dos tirent les portails : leurs boutons ne servent que sans
-        // elles, sauf choix contraire (P2_PORTAL_BUTTONS=1 toujours, =0 jamais).
-        if ((all[i].action == MOUSE_LEFT || all[i].action == MOUSE_RIGHT) && !portal_buttons()) continue;
-        b[n++] = all[i];
-    }
-    return n;
-}
-- (int)buttonAt:(CGPoint)p {
-    Button b[MAX_BUTTONS]; int n = [self buttons:b];
-    for (int i = 0; i < n; ++i) if (hypot(p.x - b[i].at.x, p.y - b[i].at.y) < b[i].size * .62) return (int)b[i].action;
-    return -1;
-}
-
-// ---- doigts ----
-// Inclinaison du stick tenu par ce doigt, de -1 à 1 par axe (y vers le haut),
-// zone morte de 15 % retranchée.
-- (void)deflectionOf:(P2Finger *)f x:(CGFloat *)x y:(CGFloat *)y {
-    CGFloat dx = f.at.x - f.start.x, dy = f.start.y - f.at.y, r = self.stickRadius, dist = hypot(dx, dy);
-    if (dist > r) { dx *= r / dist; dy *= r / dist; dist = r; }
-    CGFloat dead = r * .15;
-    if (dist < dead) { *x = *y = 0; return; }
-    CGFloat k = (dist - dead) / (r - dead) / dist;
-    *x = dx * k; *y = dy * k;
-}
+// ---- déplacement ----
 - (void)updateMove {
-    BOOL wanted[4] = {NO, NO, NO, NO};
-    CGFloat ax = 0, ay = 0;
-    for (P2Finger *f in fingers.objectEnumerator) {
-        if (f.role != ROLE_MOVE) continue;
-        CGFloat x, y; [self deflectionOf:f x:&x y:&y];
-        ax = x; ay = y;
-        if (hypot(x, y) < .2) continue;
-        CGFloat angle = atan2(y, x);   // secteurs de 45° : les diagonales enfoncent deux touches
-        wanted[0] |= angle > M_PI / 8 && angle < M_PI - M_PI / 8;
-        wanted[2] |= angle < -M_PI / 8 && angle > -M_PI + M_PI / 8;
-        wanted[3] |= fabs(angle) < 3 * M_PI / 8;
-        wanted[1] |= fabs(angle) > 5 * M_PI / 8;
-    }
+    CGFloat ax = router.move[0], ay = router.move[1];
+    int keys[4];
+    rt_touch_move_keys((float)ax, (float)ay, keys);
+    BOOL wanted[4] = {keys[0] != 0, keys[1] != 0, keys[2] != 0, keys[3] != 0};
     if (testMove) {   // essai (testStep)
         static double angle = -1;
         if (angle < 0) { const char *e = getenv("P2_TOUCH_TEST_ANGLE"); angle = e ? atof(e) * M_PI / 180 : 0; }
@@ -562,7 +515,7 @@ static BOOL portal_buttons(void) {
     static double at = -1, x, y; static Uint64 when; static int step;
     if (at == -1) { const char *e = getenv("P2_TOUCH_TEST_CLICK");
         if (!e || sscanf(e, "%lf,%lf,%lf", &at, &x, &y) != 3 || at <= 0) at = -2; }
-    if (at <= 0 || !menu) return;
+    if (at <= 0 || !router.menu) return;
     Uint64 now = SDL_GetTicks64();
     if (!when) { when = now + (Uint64)(at * 1000); return; }
     if (now < when) return;
@@ -587,7 +540,7 @@ static BOOL portal_buttons(void) {
     }
     if (!plan || !*plan) return;
     Uint64 now = SDL_GetTicks64();
-    if (menu || (!pad && !padRefused)) { testNext = 0; return; }   // en partie, manette prête
+    if (router.menu || (!pad && !padRefused)) { testNext = 0; return; }   // en partie, manette prête
     if (!testNext) { testNext = now + (Uint64)(delay * 1000); testPhase = 0; return; }
     if (now < testNext) return;
     // Étapes paires : début d'inclinaison ; impaires : fin et repos.
@@ -648,79 +601,53 @@ static Sint16 axis_value(CGFloat speed, int response) {
     for (int i = 0; i < 2; ++i)
         if (v[i] != padAxes[i]) { padAxes[i] = v[i]; SDL_JoystickSetVirtualAxis(pad, i, v[i]); }
 }
-- (BOOL)roleTaken:(Role)role {
-    for (P2Finger *f in fingers.objectEnumerator) if (f.role == role) return YES;
-    return NO;
-}
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    concealed = NO;   // un toucher ramène la surcouche cachée pour une manette
+    rt_touch_set_hidden(&router, 0);   // un toucher ramène la surcouche cachée pour une manette
     backtap_touch(touches);   // un toucher secoue le téléphone : pas de tape au dos autour
     for (UITouch *t in touches) {
-        P2Finger *f = [P2Finger new];
-        f.start = f.at = [t locationInView:self];
+        CGPoint p = [t locationInView:self];
         // Coin haut gauche : affiche ou masque le compteur d'images, choix gardé
         // dans les réglages (clé P2ShowFPS de la page Réglages).
-        if (CGRectContainsPoint([self fpsCorner], f.start)) {
+        rt_touch_rect c = router.layout.fps_corner;
+        if (CGRectContainsPoint(CGRectMake(c.x, c.y, c.w, c.h), p)) {
             fpsHidden = !fpsHidden;
             [NSUserDefaults.standardUserDefaults setBool:!fpsHidden forKey:@"P2ShowFPS"];
             fps = 0; fpsAt = 0;
-            redraw(self);
             continue;
         }
-        int button = [self buttonAt:f.start];
-        BOOL left = f.start.x < CGRectGetMidX(self.bounds);
-        if (button >= 0) { f.role = ROLE_BUTTON; f.action = (Action)button; [self action:f.action down:YES]; }
-        else if (left && ![self roleTaken:ROLE_MOVE]) f.role = ROLE_MOVE;
-        else if (!left && ![self roleTaken:ROLE_LOOK]) f.role = ROLE_LOOK;
-        else continue;   // second doigt sur un stick déjà tenu : ignoré
-        [fingers setObject:f forKey:t];
+        rt_touch_down(&router, (uintptr_t)(__bridge void *)t, (rt_touch_point){(float)p.x, (float)p.y}, t.timestamp);
     }
-    [self updateMove]; redraw(self);
+    redraw(self);
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
     for (UITouch *t in touches) {
-        P2Finger *f = [fingers objectForKey:t];
         CGPoint p = [t locationInView:self];
-        if (f && f.role == ROLE_LOOK && trackpad) {
-            accel_init();
-            double dx = p.x - f.at.x, dy = p.y - f.at.y, dt = t.timestamp - f.stamp;
-            // dt borné : premier mouvement (stamp nul) ou doigt resté immobile longtemps
-            if (f.stamp > 0 && dt > 1e-4) f.speed += accel.smooth * (fmin(hypot(dx, dy) / fmin(dt, 0.1), 1e4) - f.speed);
-            f.stamp = t.timestamp;
-            float k = kTrackpadLook * look_speed() * trackpad_gain(f.speed);
-            if (accel.log) fprintf(stderr, "[ios] trackpad %.0f pt/s gain %.2f\n", f.speed, k / (kTrackpadLook * look_speed()));
-            [self lookBy:(float)dx * k y:(float)dy * k];
-        }
-        f.at = p;
+        rt_touch_moved(&router, (uintptr_t)(__bridge void *)t, (rt_touch_point){(float)p.x, (float)p.y}, t.timestamp);
     }
-    [self updateMove]; redraw(self);
+    redraw(self);
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
     backtap_touch(touches);
-    for (UITouch *t in touches) {
-        P2Finger *f = [fingers objectForKey:t];
-        if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
-        [fingers removeObjectForKey:t];
-    }
-    [self updateMove]; redraw(self);
+    for (UITouch *t in touches) rt_touch_up(&router, (uintptr_t)(__bridge void *)t);
+    redraw(self);
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self touchesEnded:touches withEvent:event]; }
-- (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; redraw(self); }
+- (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; redraw(self); }   // disposition suivante : step
 
 // ---- dessin ----
 - (void)drawStick:(CGContextRef)c right:(BOOL)right ink:(UIColor *)ink {
-    CGFloat r = self.stickRadius;
-    CGPoint origin = [self restingStick:right], knob = origin;
-    for (P2Finger *f in fingers.objectEnumerator)
-        if (f.role == (right ? ROLE_LOOK : ROLE_MOVE)) { origin = f.start; knob = f.at; }
+    CGFloat r = router.layout.stick_radius;
+    rt_touch_point rest = router.layout.rest[right ? 1 : 0], start = rest, at = rest;
+    rt_touch_role_points(&router, right ? RT_TOUCH_LOOK : RT_TOUCH_MOVE, &start, &at);
+    CGPoint origin = CGPointMake(start.x, start.y), knob = CGPointMake(at.x, at.y);
     CGFloat dx = knob.x - origin.x, dy = knob.y - origin.y, dist = hypot(dx, dy);
     if (dist > r) knob = CGPointMake(origin.x + dx * r / dist, origin.y + dy * r / dist);
     CGContextSetStrokeColorWithColor(c, ink.CGColor); CGContextSetFillColorWithColor(c, ink.CGColor);
     CGContextStrokeEllipseInRect(c, CGRectMake(origin.x - r, origin.y - r, 2 * r, 2 * r));
-    CGContextFillEllipseInRect(c, CGRectMake(knob.x - kButtonSize / 2, knob.y - kButtonSize / 2, kButtonSize, kButtonSize));
+    CGContextFillEllipseInRect(c, CGRectMake(knob.x - kKnobSize / 2, knob.y - kKnobSize / 2, kKnobSize, kKnobSize));
 }
 // Compteur d'images, relevé deux fois par seconde (redessiner l'incrustation
 // coûte : seulement quand la valeur change). P2_SHOW_FPS=0 (Réglages) le masque.
@@ -763,12 +690,6 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     return CGRectMake(round(CGRectGetMinX(a) + 8), round(CGRectGetMinY(a) + 8),
                       (text.length * 6 - 1) * kPixel + 2 * margin, 7 * kPixel + 2 * margin);
 }
-// Zone qui bascule le compteur : le coin jusqu'au compteur le plus large, et
-// un peu plus (le doigt couvre mal un si petit carré).
-- (CGRect)fpsCorner {
-    CGRect box = [self fpsBox:@"000 FPS"];
-    return CGRectMake(0, 0, CGRectGetMaxX(box) + 20, CGRectGetMaxY(box) + 20);
-}
 - (void)drawFPS {
     if (fps <= 0) return;
     NSString *text = [NSString stringWithFormat:@"%d FPS", fps];
@@ -791,27 +712,41 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
 }
 - (void)drawRect:(CGRect)rect {
     (void)rect;
-    if (!concealed) [self drawFPS];   // aussi dans les menus
-    if (concealed || menu || getenv("P2_TOUCH_TEST_MOVE")) return;   // essai : écran dégagé
+    if (!router.hidden) [self drawFPS];   // aussi dans les menus
+    if (router.hidden || router.menu || getenv("P2_TOUCH_TEST_MOVE")) return;   // essai : écran dégagé
     CGContextRef c = UIGraphicsGetCurrentContext();
     UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
+    UIColor *blue = [UIColor colorWithRed:.16 green:.55 blue:1 alpha:.6], *orange = [UIColor colorWithRed:1 green:.55 blue:.05 alpha:.6];
+    UIColor *shade = [UIColor colorWithWhite:0 alpha:.35];   // fond sombre : icônes lisibles sur un mur clair
     CGContextSetLineWidth(c, 2);
     [self drawStick:c right:NO ink:ink];
-    if (!trackpad) [self drawStick:c right:YES ink:ink];
-    Button b[MAX_BUTTONS]; int n = [self buttons:b];
-    for (int i = 0; i < n; ++i) {
-        CGFloat s = b[i].size;
-        CGRect box = CGRectMake(b[i].at.x - s / 2, b[i].at.y - s / 2, s, s);
-        UIColor *fill = held[b[i].action] ? [b[i].color colorWithAlphaComponent:.9] : b[i].color;
+    if (!router.trackpad) [self drawStick:c right:YES ink:ink];
+    for (int i = 0; i < router.layout.count; ++i) {
+        const rt_touch_button *b = &router.layout.buttons[i];
+        NSString *symbol = nil; UIColor *color = shade;
+        switch (b->action) {
+        case RT_TOUCH_FIRE_BLUE: color = blue; break;
+        case RT_TOUCH_FIRE_ORANGE: color = orange; break;
+        case RT_TOUCH_JUMP: symbol = @"arrow.up"; break;
+        case RT_TOUCH_CROUCH: symbol = @"arrow.down"; break;
+        case RT_TOUCH_USE: symbol = @"hand.point.up.left.fill"; break;
+        case RT_TOUCH_PAUSE: symbol = @"pause.fill"; break;
+        // L'icône montre le mode actuel de la caméra.
+        case RT_TOUCH_LOOK_MODE: symbol = router.trackpad ? @"hand.draw.fill" : @"r.joystick.fill"; break;
+        default: break;
+        }
+        CGFloat s = b->size;
+        CGRect box = CGRectMake(b->at.x - s / 2, b->at.y - s / 2, s, s);
+        UIColor *fill = rt_touch_held(&router, b->action) ? [color colorWithAlphaComponent:.9] : color;
         CGContextSetFillColorWithColor(c, fill.CGColor); CGContextFillEllipseInRect(c, box);
         CGContextSetStrokeColorWithColor(c, line.CGColor); CGContextStrokeEllipseInRect(c, box);
-        if (!b[i].symbol) continue;
+        if (!symbol) continue;
         UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:s * .38
                                                                                              weight:UIImageSymbolWeightBold];
-        UIImage *icon = [[UIImage systemImageNamed:b[i].symbol withConfiguration:config]
+        UIImage *icon = [[UIImage systemImageNamed:symbol withConfiguration:config]
                          imageWithTintColor:[UIColor colorWithWhite:1 alpha:.85] renderingMode:UIImageRenderingModeAlwaysOriginal];
         CGSize z = icon.size;
-        [icon drawInRect:CGRectMake(b[i].at.x - z.width / 2, b[i].at.y - z.height / 2, z.width, z.height)];
+        [icon drawInRect:CGRectMake(b->at.x - z.width / 2, b->at.y - z.height / 2, z.width, z.height)];
     }
 }
 @end
