@@ -32,12 +32,15 @@ enum { RT_TOUCH_MAX_FINGERS = 16, RT_TOUCH_MAX_BUTTONS = 10 };
 
 typedef struct { float x, y; } rt_touch_point;
 typedef struct { float x, y, w, h; } rt_touch_rect;
-typedef struct { rt_touch_action action; rt_touch_point at; float size; } rt_touch_button;
+// Bouton : ellipse dessinée de w × h pt autour de `at` (cercle si w == h ; les
+// portails de l'iPad sont des ovales horizontaux, w > h).
+typedef struct { rt_touch_action action; rt_touch_point at; float w, h; } rt_touch_button;
 
 typedef struct {
     rt_touch_rect bounds, safe;
     rt_touch_rect fps_corner;     // bascule du compteur d'images (coin haut gauche)
     int portal_buttons;
+    int pad;                      // disposition de l'iPad (actions en bas, contre les coins)
     int count;
     rt_touch_button buttons[RT_TOUCH_MAX_BUTTONS];
     float stick_radius;
@@ -89,12 +92,25 @@ float rt_touch_trackpad_gain(const rt_touch_tuning *tuning, double speed);
 // sur téléphone seulement sans tapes au dos.
 int rt_touch_portal_buttons(const char *setting, int is_pad, int back_taps);
 
-void rt_touch_layout_make(rt_touch_layout *layout, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons);
+// Deux dispositions, toutes deux relatives à la zone sûre :
+// - téléphone (pad = 0) : sauter, s'accroupir et utiliser le long du bord
+//   droit ; les boutons de portail facultatifs sont deux paires de cercles en
+//   miroir dans les coins du haut ;
+// - iPad (pad = 1) : tout sauf Pause en bas, contre les coins, sous les pouces.
+//   À droite, exactement deux boutons de portail, des ovales horizontaux en
+//   quinconce (bleu en bas vers l'intérieur, orange plus haut contre le bord),
+//   sauter dans le coin, utiliser côté caméra, s'accroupir au-dessus ; sans
+//   boutons de portail, ces trois-là restent groupés dans le coin. À gauche,
+//   le mode de caméra dans le coin et le stick juste au-dessus. Tailles et
+//   marges vont de « compact » (fenêtre étroite) à « large » (plein écran).
+// Pause reste seule dans le coin haut droit.
+void rt_touch_layout_make(rt_touch_layout *layout, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons, int pad);
 // Bouton sous le point (le plus proche dont la zone le contient), sinon -1.
+// La zone de toucher est la forme dessinée, élargie de la même marge partout.
 int rt_touch_button_at(const rt_touch_layout *layout, rt_touch_point p);
 
 void rt_touch_init(rt_touch_router *r, const rt_touch_tuning *tuning, const rt_touch_sink *sink, int trackpad);
-// Nouvelle disposition (taille, zone sûre, rotation, boutons de portail) :
+// Nouvelle disposition (taille, zone sûre, rotation, boutons de portail, iPad) :
 // tout est relâché si elle diffère. Rend 1 dans ce cas.
 int rt_touch_set_layout(rt_touch_router *r, const rt_touch_layout *layout);
 void rt_touch_set_menu(rt_touch_router *r, int menu);

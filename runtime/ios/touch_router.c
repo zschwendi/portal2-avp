@@ -6,7 +6,7 @@
 #include <string.h>
 
 static const float kButtonSize = 54, kPortalSize = 60, kSmallSize = 54 * .75f;
-static const float kHitScale = .62f;     // zone de toucher : un peu plus large que le cercle dessiné
+static const float kHitScale = .62f;     // zone de toucher : un peu plus large que la forme dessinée
 static const float kPortalGap = 60 * 1.15f;
 static const float kStickLook = 90;      // comptes de souris par image, stick à fond (≈ 360°/s à la sensibilité 3 du jeu)
 static const float kTrackpadLook = 3.5f; // comptes de souris par point de glissement
@@ -32,18 +32,22 @@ int rt_touch_portal_buttons(const char *setting, int is_pad, int back_taps) {
 }
 
 // ---- disposition ----
-static void add_button(rt_touch_layout *l, rt_touch_action action, float x, float y, float size) {
-    if (l->count < RT_TOUCH_MAX_BUTTONS) l->buttons[l->count++] = (rt_touch_button){action, {x, y}, size};
+static void add_button(rt_touch_layout *l, rt_touch_action action, float x, float y, float w, float h) {
+    if (l->count < RT_TOUCH_MAX_BUTTONS) l->buttons[l->count++] = (rt_touch_button){action, {x, y}, w, h};
 }
+static void add_round(rt_touch_layout *l, rt_touch_action action, float x, float y, float size) {
+    add_button(l, action, x, y, size, size);
+}
+static float mix(float a, float b, float k) { return a + (b - a) * k; }
 
-void rt_touch_layout_make(rt_touch_layout *l, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons) {
-    memset(l, 0, sizeof(*l));
-    l->bounds = bounds; l->safe = safe; l->portal_buttons = !!portal_buttons;
-    float x = safe.x, y = safe.y, w = safe.w, h = safe.h;
-    // Compteur d'images « 000 FPS » (police 5×7 de 2 pt, marge 4) à 8 pt du coin
-    // de la zone sûre ; zone de bascule un peu plus grande (doigt imprécis).
-    l->fps_corner = (rt_touch_rect){0, 0, roundf(x + 8) + 90 + 20, roundf(y + 8) + 22 + 20};
-    l->stick_radius = fminf(66, h * .15f);
+// Marge de la zone de toucher autour de la forme dessinée, la même dans toutes
+// les directions : 12 % du petit côté (un cercle se touche à 62 % de son diamètre).
+static float hit_slack(const rt_touch_button *b) { return (kHitScale - .5f) * fminf(b->w, b->h); }
+
+// Téléphone : sticks à mi-hauteur, actions le long du bord droit ; les boutons
+// de portail facultatifs (sans tapes au dos) sont des cercles en haut.
+static void phone_layout(rt_touch_layout *l) {
+    float x = l->safe.x, y = l->safe.y, w = l->safe.w, h = l->safe.h;
     l->rest[0] = (rt_touch_point){x + w * .16f, y + h * .72f};
     l->rest[1] = (rt_touch_point){x + w * .80f, y + h * .72f};
     // Pause dans le coin haut droit, mode de la caméra dans le coin bas gauche.
@@ -53,26 +57,113 @@ void rt_touch_layout_make(rt_touch_layout *l, rt_touch_rect bounds, rt_touch_rec
     float top = fmaxf(y + h * .19f, fmaxf(pause.y + kSmallSize / 2 + kPortalSize / 2 + 8,
                                            l->fps_corner.h + kPortalSize / 2 + 8));
     float crouch = y + h * .40f;
-    if (portal_buttons) {
-        add_button(l, RT_TOUCH_FIRE_BLUE, x + w * .06f, top, kPortalSize);
-        add_button(l, RT_TOUCH_FIRE_ORANGE, x + w * .06f + kPortalGap, top, kPortalSize);
-        add_button(l, RT_TOUCH_FIRE_BLUE, x + w * .94f, top, kPortalSize);
-        add_button(l, RT_TOUCH_FIRE_ORANGE, x + w * .94f - kPortalGap, top, kPortalSize);
+    if (l->portal_buttons) {
+        add_round(l, RT_TOUCH_FIRE_BLUE, x + w * .06f, top, kPortalSize);
+        add_round(l, RT_TOUCH_FIRE_ORANGE, x + w * .06f + kPortalGap, top, kPortalSize);
+        add_round(l, RT_TOUCH_FIRE_BLUE, x + w * .94f, top, kPortalSize);
+        add_round(l, RT_TOUCH_FIRE_ORANGE, x + w * .94f - kPortalGap, top, kPortalSize);
         crouch = fmaxf(crouch, top + kPortalSize / 2 + kButtonSize / 2 + 8);
     }
-    add_button(l, RT_TOUCH_JUMP, x + w * .94f, y + h * .50f, kButtonSize);
-    add_button(l, RT_TOUCH_CROUCH, x + w * .80f, crouch, kButtonSize);
-    add_button(l, RT_TOUCH_USE, x + w * .94f, y + h * .80f, kButtonSize);
-    add_button(l, RT_TOUCH_PAUSE, pause.x, pause.y, kSmallSize);
-    add_button(l, RT_TOUCH_LOOK_MODE, x + kButtonSize * .45f, y + h - kButtonSize * .45f, kSmallSize);
+    add_round(l, RT_TOUCH_JUMP, x + w * .94f, y + h * .50f, kButtonSize);
+    add_round(l, RT_TOUCH_CROUCH, x + w * .80f, crouch, kButtonSize);
+    add_round(l, RT_TOUCH_USE, x + w * .94f, y + h * .80f, kButtonSize);
+    add_round(l, RT_TOUCH_PAUSE, pause.x, pause.y, kSmallSize);
+    add_round(l, RT_TOUCH_LOOK_MODE, x + kButtonSize * .45f, y + h - kButtonSize * .45f, kSmallSize);
+}
+
+// iPad : on le tient par les coins du bas, les actions descendent sous les
+// pouces, contre ces deux coins. Pause reste seule en haut à droite.
+//
+//   coin gauche                                      coin droit
+//                                                        (accroupi)
+//       stick                            (utiliser) (  orange  )
+//   (mode)                                    (  bleu  ) (saut)
+//
+// À droite, dans la zone de tir habituelle d'un FPS tactile, exactement deux
+// boutons de portail : des ovales horizontaux en quinconce le long de l'arc
+// du pouce, bleu en bas vers l'intérieur, orange une rangée plus haut contre
+// le bord. On passe de l'un à l'autre en pivotant le pouce, et haut/bas suffit
+// à les reconnaître sans regarder. Les deux creux de la quinconce reçoivent
+// des boutons ronds : sauter dans le coin (calé par les deux bords de
+// l'appareil), utiliser en haut vers l'intérieur (le plus près du pouce qui
+// vise) ; s'accroupir, rare et tenu, au-dessus contre le bord. Le groupe tient
+// dans une bande étroite : le reste de la moitié droite est à la caméra.
+// Sans boutons de portail (P2_PORTAL_BUTTONS=0), le groupe reste en bas :
+// sauter dans le coin, utiliser à côté, s'accroupir au-dessus.
+// À gauche, rien que le déplacement : le mode de caméra dans le coin et le
+// stick au repos juste au-dessus, en diagonale.
+// Tailles et marges vont de « compact » (fenêtre étroite : Split View, Slide
+// Over) à « large » (plein écran).
+static void pad_layout(rt_touch_layout *l) {
+    float left = l->safe.x, top = l->safe.y, w = l->safe.w, h = l->safe.h;
+    float right = left + w, bottom = top + h, r = l->stick_radius;
+    int ovals = l->portal_buttons;
+    float k = fminf(1, fmaxf(0, (fminf(w / 1024, h / 700) - .55f) / .45f));   // 0 compact, 1 large
+    float round = mix(kButtonSize, 62, k), small = mix(kSmallSize, 46, k);
+    float oval_w = mix(86, 116, k), oval_h = mix(52, 66, k);
+    // L'écart dépasse la somme des marges de toucher de deux voisins : les zones
+    // de toucher ne se recouvrent pas plus que les formes dessinées.
+    float gap = mix(14, 17, k), margin = mix(10, 30, k);
+    // Distances au bord latéral (in_*) et au bas (up_*) de la zone sûre. Rangée
+    // du bas : sauter dans le coin puis, vers l'intérieur, l'ovale bleu (sans
+    // ovales : utiliser). Rangée du dessus : l'ovale orange contre le bord puis
+    // utiliser (sans ovales : s'accroupir, seul).
+    float row = ovals ? fmaxf(round, oval_h) : round, beside = ovals ? oval_w : round;
+    float up_low = margin + row / 2, up_high = up_low + row + gap;
+    float in_corner = margin + round / 2, reach = margin + round + gap + beside;   // largeur du groupe
+    float up_crouch = ovals ? up_high + row / 2 + gap + round / 2 : up_high;
+    if (ovals) {
+        add_button(l, RT_TOUCH_FIRE_BLUE, right - (margin + round + gap + oval_w / 2), bottom - up_low, oval_w, oval_h);
+        add_button(l, RT_TOUCH_FIRE_ORANGE, right - (margin + oval_w / 2), bottom - up_high, oval_w, oval_h);
+    }
+    add_round(l, RT_TOUCH_JUMP, right - in_corner, bottom - up_low, round);
+    add_round(l, RT_TOUCH_CROUCH, right - in_corner, bottom - up_crouch, round);
+    add_round(l, RT_TOUCH_USE, right - (reach - round / 2), bottom - (ovals ? up_high : up_low), round);
+    float inset = small / 2 + mix(4, 8, k);
+    add_round(l, RT_TOUCH_PAUSE, right - inset, top + inset, small);
+    add_round(l, RT_TOUCH_LOOK_MODE, left + in_corner, bottom - up_low, small);
+
+    // Stick gauche au repos : en diagonale au-dessus du mode de caméra, à un
+    // écart de lui ; dans une fenêtre étroite, ramené vers le bord (et plus
+    // haut) pour rester dans sa moitié, sans atteindre le groupe de droite.
+    float clear = small / 2 + gap + r;
+    float in_rest = fminf(in_corner + clear * (float)M_SQRT1_2, fminf(w / 2 - r, w - reach - gap - r));
+    in_rest = fmaxf(margin + r, in_rest);
+    float up_rest = up_low + sqrtf(fmaxf(0, clear * clear - (in_rest - in_corner) * (in_rest - in_corner)));
+    // Stick droit au repos : juste à l'intérieur du groupe, à la hauteur du
+    // gauche ; s'il déborderait sur la moitié gauche (fenêtre étroite et
+    // haute), au-dessus du groupe.
+    float in_look = reach + gap + r, up_look = up_rest;
+    if (in_look + r > w / 2) {
+        in_look = fmaxf(margin + r, reach / 2);
+        up_look = up_crouch + round / 2 + gap + r;
+    }
+    l->rest[0] = (rt_touch_point){left + in_rest, bottom - up_rest};
+    l->rest[1] = (rt_touch_point){right - in_look, bottom - up_look};
+}
+
+void rt_touch_layout_make(rt_touch_layout *l, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons, int pad) {
+    memset(l, 0, sizeof(*l));
+    l->bounds = bounds; l->safe = safe; l->portal_buttons = !!portal_buttons; l->pad = !!pad;
+    // Compteur d'images « 000 FPS » (police 5×7 de 2 pt, marge 4) à 8 pt du coin
+    // de la zone sûre ; zone de bascule un peu plus grande (doigt imprécis).
+    l->fps_corner = (rt_touch_rect){0, 0, roundf(safe.x + 8) + 90 + 20, roundf(safe.y + 8) + 22 + 20};
+    l->stick_radius = fminf(66, safe.h * .15f);
+    if (pad) pad_layout(l); else phone_layout(l);
 }
 
 int rt_touch_button_at(const rt_touch_layout *l, rt_touch_point p) {
     int best = -1; float best_d = 0;
     for (int i = 0; i < l->count; ++i) {
         const rt_touch_button *b = &l->buttons[i];
-        float d = hypotf(p.x - b->at.x, p.y - b->at.y);
-        if (d < b->size * kHitScale && (best < 0 || d < best_d)) { best = (int)b->action; best_d = d; }
+        float dx = p.x - b->at.x, dy = p.y - b->at.y, d = hypotf(dx, dy);
+        int hit = d < b->w * kHitScale;   // cercle
+        if (b->w != b->h) {               // ovale : ellipse dessinée, élargie de la même marge
+            float slack = hit_slack(b);
+            dx /= b->w / 2 + slack; dy /= b->h / 2 + slack;
+            hit = dx * dx + dy * dy < 1;
+        }
+        if (hit && (best < 0 || d < best_d)) { best = (int)b->action; best_d = d; }
     }
     return best;
 }
@@ -129,7 +220,7 @@ void rt_touch_cancel_all(rt_touch_router *r) {
 int rt_touch_set_layout(rt_touch_router *r, const rt_touch_layout *l) {
     const rt_touch_layout *o = &r->layout;
     if (!memcmp(&o->bounds, &l->bounds, sizeof(l->bounds)) && !memcmp(&o->safe, &l->safe, sizeof(l->safe)) &&
-        o->portal_buttons == l->portal_buttons && o->count == l->count)
+        o->portal_buttons == l->portal_buttons && o->pad == l->pad && o->count == l->count)
         return 0;
     // Rotation ou nouvelle zone sûre : les boutons ont bougé sous les doigts.
     rt_touch_cancel_all(r);

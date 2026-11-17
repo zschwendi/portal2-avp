@@ -40,7 +40,9 @@ class TouchRouterTest(unittest.TestCase):
         self.assertGreaterEqual(len(names), 8, out)
         for name in ('touch_router_multi_finger_release', 'touch_router_cancel_releases_and_forgets',
                      'touch_router_menu_vs_game_route', 'touch_router_rotation_releases',
-                     'touch_router_controller_handoff_and_background', 'touch_router_layout_fits'):
+                     'touch_router_controller_handoff_and_background', 'touch_router_layout_fits',
+                     'touch_router_phone_layout_unchanged', 'touch_router_pad_corner_layout',
+                     'touch_router_pad_ovals_route'):
             self.assertIn(name, names)
 
     def test_overlay_uses_router(self):

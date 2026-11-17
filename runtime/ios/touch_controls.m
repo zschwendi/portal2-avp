@@ -17,9 +17,13 @@
 //   P2TouchTrackpad dans les réglages de l'app) ;
 // - portails : tapes au dos (ci-dessous) ; sans capteur de mouvement
 //   (simulateur) ou avec P2_BACKTAP=0, une paire de boutons bleu (clic gauche)
-//   / orange (clic droit) dans chaque coin du haut ;
+//   / orange (clic droit) dans chaque coin du haut ; sur iPad, exactement deux
+//   ovales horizontaux en quinconce sous le pouce droit, dans le coin du bas
+//   (bleu en bas vers l'intérieur, orange plus haut contre le bord) ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
-//   pause (Échap) ;
+//   pause (Échap) ; sur iPad, les trois premières entourent les ovales dans le
+//   coin bas droit, et le mode de caméra tient le coin bas gauche sous le stick
+//   (disposition : touch_router.c) ;
 // - tapes au dos ou sur les côtés du téléphone (index derrière, en paysage) :
 //   à gauche portail bleu, à droite orange ; détection dans back_tap.c,
 //   nourrie ici par CoreMotion (P2_BACKTAP=0 la coupe, réglages dans
@@ -374,7 +378,7 @@ static void sink_look_mode(void *ctx, int trackpad) { [(__bridge P2TouchControls
     rt_touch_layout l;
     rt_touch_layout_make(&l, (rt_touch_rect){(float)b.origin.x, (float)b.origin.y, (float)b.size.width, (float)b.size.height},
                          (rt_touch_rect){(float)a.origin.x, (float)a.origin.y, (float)a.size.width, (float)a.size.height},
-                         rt_touch_portal_buttons(getenv("P2_PORTAL_BUTTONS"), isPad, backtap_motion != nil));
+                         rt_touch_portal_buttons(getenv("P2_PORTAL_BUTTONS"), isPad, backtap_motion != nil), isPad);
     return l;
 }
 
@@ -723,10 +727,10 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     if (!router.trackpad) [self drawStick:c right:YES ink:ink];
     for (int i = 0; i < router.layout.count; ++i) {
         const rt_touch_button *b = &router.layout.buttons[i];
-        NSString *symbol = nil; UIColor *color = shade;
+        NSString *symbol = nil; UIColor *color = shade, *glow = UIColor.whiteColor;
         switch (b->action) {
-        case RT_TOUCH_FIRE_BLUE: color = blue; break;
-        case RT_TOUCH_FIRE_ORANGE: color = orange; break;
+        case RT_TOUCH_FIRE_BLUE: color = glow = blue; break;
+        case RT_TOUCH_FIRE_ORANGE: color = glow = orange; break;
         case RT_TOUCH_JUMP: symbol = @"arrow.up"; break;
         case RT_TOUCH_CROUCH: symbol = @"arrow.down"; break;
         case RT_TOUCH_USE: symbol = @"hand.point.up.left.fill"; break;
@@ -735,13 +739,23 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
         case RT_TOUCH_LOOK_MODE: symbol = router.trackpad ? @"hand.draw.fill" : @"r.joystick.fill"; break;
         default: break;
         }
-        CGFloat s = b->size;
-        CGRect box = CGRectMake(b->at.x - s / 2, b->at.y - s / 2, s, s);
-        UIColor *fill = rt_touch_held(&router, b->action) ? [color colorWithAlphaComponent:.9] : color;
+        // Ellipse du routeur : ovale horizontal pour un portail, cercle sinon.
+        CGRect box = CGRectMake(b->at.x - b->w / 2, b->at.y - b->h / 2, b->w, b->h);
+        // Tenu (doigt, tape au dos) : fond presque opaque. Sur iPad, où le pouce
+        // couvre le bouton, s'y ajoutent un contour blanc épais et un halo de
+        // la couleur du bouton qui dépasse du pouce ; le téléphone garde son dessin.
+        BOOL held = rt_touch_held(&router, b->action) != 0, bold = held && router.layout.pad;
+        UIColor *fill = held ? [color colorWithAlphaComponent:.9] : color;
         CGContextSetFillColorWithColor(c, fill.CGColor); CGContextFillEllipseInRect(c, box);
-        CGContextSetStrokeColorWithColor(c, line.CGColor); CGContextStrokeEllipseInRect(c, box);
+        CGContextSetLineWidth(c, bold ? 3 : 2);
+        CGContextSetStrokeColorWithColor(c, (bold ? [UIColor colorWithWhite:1 alpha:.95] : line).CGColor);
+        CGContextStrokeEllipseInRect(c, box);
+        if (bold) {
+            CGContextSetStrokeColorWithColor(c, [glow colorWithAlphaComponent:.55].CGColor);
+            CGContextStrokeEllipseInRect(c, CGRectInset(box, -5, -5));
+        }
         if (!symbol) continue;
-        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:s * .38
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:b->h * .38
                                                                                              weight:UIImageSymbolWeightBold];
         UIImage *icon = [[UIImage systemImageNamed:symbol withConfiguration:config]
                          imageWithTintColor:[UIColor colorWithWhite:1 alpha:.85] renderingMode:UIImageRenderingModeAlwaysOriginal];
