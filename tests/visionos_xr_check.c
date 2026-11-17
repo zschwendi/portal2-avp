@@ -160,11 +160,13 @@ static void spatial_controller_tracking(void) {
     p2_xr_publish_input(session,&input);
     p2_xr_read_latest(&snapshot,&read); assert(read.orange_trigger == 1);
     input.spatial = 1;
+    // A malformed right pose drops only that controller: the head frame and
+    // the pair's controls survive (strict head checks: invalid_poses()).
     f.sequence = 4; f.presentation_time = 4; f.controllers[1].tracked = 1;
     f.controllers[1].tracking_from_aim.columns[0].x = NAN;
-    assert(!p2_xr_publish_frame(session,&f));
-    assert(!p2_xr_read_latest(&snapshot,&read));
-    assert(!read.connected && !read.buttons);
+    assert(p2_xr_publish_frame(session,&f));
+    assert(p2_xr_read_latest(&snapshot,&read) == session);
+    assert(!snapshot.controllers[1].tracked && read.connected);
     p2_xr_end_session(session);
     // A Sense pair whose right controller is never tracked (left-only,
     // occluded from the start) still drives the game.
@@ -189,6 +191,76 @@ static void spatial_controller_tracking(void) {
     p2_xr_publish_input(session,&input);               // still held: still released
     p2_xr_read_controls(&read); assert(read.connected && !read.buttons && !read.blue_trigger);
     p2_xr_end_session(session);
+}
+static P2XRControllerPose pose_at(float x) {
+    P2XRControllerPose pose = {.tracked=1,.tracking_from_aim=matrix_identity_float4x4,.tracking_from_grip=matrix_identity_float4x4};
+    pose.tracking_from_aim.columns[3] = (vector_float4){x,1.2f,2.5f,1};
+    pose.tracking_from_grip.columns[3] = pose.tracking_from_aim.columns[3];
+    return pose;
+}
+// Invalid accessory poses never disable valid head/eye tracking; invalid
+// head/eye poses still reject the whole frame.
+static void invalid_poses(void) {
+    uint64_t counts[3], before[3];
+    p2_xr_pose_rejections(before);
+    uint64_t session = p2_xr_begin_session();
+    P2XRFrame f = frame(), snapshot;
+    P2XRInput held = {.connected=1,.spatial=1,.blue_trigger=1,.buttons=P2_XR_JUMP|P2_XR_USE,.move_y=0.5f}, read;
+    f.controllers[0] = pose_at(1.8f); f.controllers[1] = pose_at(2.2f);
+    assert(p2_xr_publish_frame(session,&f));
+    assert(p2_xr_publish_input(session,&held));
+    // Scaled right pose (1% scale): right dropped as a loss, left kept, head kept.
+    f.sequence = 2; f.presentation_time = 2;
+    f.controllers[1].tracking_from_aim.columns[0] *= 1.01f;
+    assert(p2_xr_publish_frame(session,&f));
+    assert(p2_xr_read_latest(&snapshot,&read) == session);
+    assert(snapshot.tracked && snapshot.controllers[0].tracked && !snapshot.controllers[1].tracked);
+    assert(read.connected && !read.buttons && read.blue_trigger == 0); near(read.move_y,0.5f);
+    p2_xr_publish_input(session,&held);                 // still held: still released
+    p2_xr_read_controls(&read); assert(!read.buttons && read.blue_trigger == 0);
+    held.buttons = 0; held.blue_trigger = 0; p2_xr_publish_input(session,&held);
+    held.buttons = P2_XR_JUMP; p2_xr_publish_input(session,&held); // a fresh press works
+    p2_xr_read_controls(&read); assert(read.buttons == P2_XR_JUMP);
+    // NaN grip on the left: only the left is dropped; no right loss release.
+    f.sequence = 3; f.presentation_time = 3; f.controllers[1] = pose_at(2.2f);
+    f.controllers[0].tracking_from_grip.columns[3].x = NAN;
+    assert(p2_xr_publish_frame(session,&f));
+    p2_xr_read_latest(&snapshot,&read);
+    assert(!snapshot.controllers[0].tracked && snapshot.controllers[1].tracked && read.buttons == P2_XR_JUMP);
+    // Reflected (det -1) and non-affine (w != 0) right poses are rejected too.
+    f.sequence = 4; f.presentation_time = 4; f.controllers[0] = pose_at(1.8f);
+    f.controllers[1].tracking_from_aim.columns[2] = -f.controllers[1].tracking_from_aim.columns[2];
+    assert(p2_xr_publish_frame(session,&f));
+    p2_xr_read_latest(&snapshot,NULL); assert(!snapshot.controllers[1].tracked && snapshot.controllers[0].tracked);
+    f.sequence = 5; f.presentation_time = 5; f.controllers[1] = pose_at(2.2f);
+    f.controllers[1].tracking_from_grip.columns[0].w = 0.5f;
+    assert(p2_xr_publish_frame(session,&f));
+    p2_xr_read_latest(&snapshot,NULL); assert(!snapshot.controllers[1].tracked);
+    // Head and eye checks stay strict: scaled head, NaN eye or a missing eye
+    // count reject the whole frame and neutralize input.
+    f = frame(); f.sequence = 6; f.presentation_time = 6;
+    f.tracking_from_head.columns[1] *= 1.01f;
+    assert(!p2_xr_publish_frame(session,&f));
+    assert(!p2_xr_read_latest(&snapshot,&read) && !read.connected);
+    f = frame(); f.sequence = 7; f.presentation_time = 7; f.eyes[1].head_from_eye.columns[3].y = NAN;
+    assert(!p2_xr_publish_frame(session,&f));
+    f = frame(); f.sequence = 8; f.presentation_time = 8; f.eye_count = 1;
+    assert(!p2_xr_publish_frame(session,&f));
+    // Ordering and session validity still apply to repaired frames.
+    f = frame(); f.sequence = 9; f.presentation_time = 9; f.controllers[1] = pose_at(2.2f);
+    f.controllers[1].tracking_from_aim.columns[3].z = INFINITY;
+    assert(p2_xr_publish_frame(session,&f));
+    assert(!p2_xr_publish_frame(session,&f));            // same sequence
+    f.sequence = 10; f.presentation_time = 8.5;
+    assert(!p2_xr_publish_frame(session,&f));            // older presentation
+    uint64_t next = p2_xr_begin_session();
+    f.sequence = 11; f.presentation_time = 11;
+    assert(!p2_xr_publish_frame(session,&f));            // retired session
+    assert(p2_xr_publish_frame(next,&f));
+    p2_xr_read_latest(&snapshot,NULL); assert(snapshot.tracked && !snapshot.controllers[1].tracked);
+    p2_xr_end_session(next);
+    p2_xr_pose_rejections(counts);
+    assert(counts[0] - before[0] == 3 && counts[1] - before[1] == 1 && counts[2] - before[2] == 5);
 }
 static void window_controls(void) {
     uint64_t window = p2_xr_begin_window_session();
@@ -524,6 +596,7 @@ static void concurrent_publication(void) {
     p2_xr_end_session(session);
 }
 int main(void) {
+    invalid_poses();
     views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
     symmetric_cover(); head_aim_body(); portal_crossing(); turning_and_settings(); controller_aim();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication, "

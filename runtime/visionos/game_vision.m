@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include "game_vision.h"
 #include "input_vision.h"
+#include "video_config.h"
 #include <SDL.h>
 
 int p2_main(int argc, char **argv);
@@ -152,6 +153,14 @@ int p2_vision_game_start(const char *trigger) {
             }
             char executable[4096]; uint32_t length = sizeof(executable);
             if (_NSGetExecutablePath(executable, &length)) { atomic_store(&state, 2); return; }
+            // The engine's first video config follows the 2560x2560 virtual
+            // display and then runs 2560x720 (video_config.h). Only that
+            // generated value is repaired; a failure keeps the engine's file.
+            char video_message[512];
+            NSString *video = [user stringByAppendingPathComponent:@"update/cfg/video.txt"];
+            P2VideoConfigResult video_result = p2_video_config_prepare(video.fileSystemRepresentation,
+                                                                       video_message, sizeof(video_message));
+            fprintf(stderr, "[vision-game] Video config: %s (result %d)\n", video_message, (int)video_result);
             setenv("P2_STEAM_API_DYLIB", executable, 1); // Existing mobile offline stub.
             setenv("SteamAppId", "620", 1); setenv("SteamGameId", "620", 1);
             setenv("SDL_VIDEODRIVER", "dummy", 1);

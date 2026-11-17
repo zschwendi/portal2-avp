@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "input_vision.h"
+#include "menu_input.h"
 #include "p2_xr.h"
 #if P2_VISION_GAME
 #include "view_vision.h"
@@ -92,6 +93,30 @@ static void gate_hands(P2XRInput *input) {
 }
 #endif
 
+// P2_VISION_INPUT_TRACE=1: what the guest virtual pad actually receives,
+// logged only when a button or a coarse axis bucket changes, at most 600 lines.
+static void trace_pad(uint64_t controls, const P2XRInput *input, const Sint16 axes[SDL_CONTROLLER_AXIS_MAX], uint32_t pressed) {
+    static int enabled = -1;
+    static unsigned lines;
+    static uint64_t last = UINT64_MAX;
+    if (enabled < 0) { const char *v = getenv("P2_VISION_INPUT_TRACE"); enabled = v && !strcmp(v,"1"); }
+    if (!enabled || lines >= 600) return;
+    uint64_t key = (uint64_t)pressed << 20 | (controls != 0) << 19 | (input->connected & 3u) << 17 | (input->spatial & 1u) << 16;
+    for (int axis = 0; axis < SDL_CONTROLLER_AXIS_MAX; ++axis)
+        key ^= (uint64_t)((axes[axis] + 32768) / 16384 & 3) << (axis * 2);
+    if (key == last) return;
+    last = key;
+    ++lines;
+#if P2_VISION_GAME
+    int ui = rt_ios_game_ui_visible();
+#else
+    int ui = -1;
+#endif
+    fprintf(stderr,"[vision-input] guest pad #%u: session=%llu connected=%u spatial=%u ui=%d buttons=%#x "
+        "axes LX=%d LY=%d RX=%d RY=%d LT=%d RT=%d\n",lines,(unsigned long long)controls,input->connected,input->spatial,ui,
+        pressed,axes[0],axes[1],axes[2],axes[3],axes[4],axes[5]);
+}
+
 int p2_vision_input_init(void) {
     SDL_Joystick *live = pad_id < 0 ? NULL : SDL_JoystickFromInstanceID(pad_id);
     if (pad && live == pad && SDL_JoystickGetAttached(pad)) return 0;
@@ -146,13 +171,24 @@ void p2_vision_input_poll(void) {
     P2XRInput input;
     // Invalid/retired session or lost head tracking is neutral; a lost right
     // Sense controller releases only the actions held at that moment.
-    p2_xr_read_controls(&input);
+    uint64_t controls = p2_xr_read_controls(&input);
 #if P2_VISION_GAME
     // Keep the game-UI flag fresh even when no RenderView runs (menus);
     // the pause-to-window flow and hand gating read it. Rate-limited to 10 Hz.
     rt_ios_game_state_poll();
     audit_input(&input);
     gate_hands(&input);
+    // Menu/gameplay rules for controllers (menu_input.h): Sense triggers
+    // select/back in menus, nothing held carries across a menu change.
+    // P2_VISION_MENU_DPAD=1 additionally turns the left stick into d-pad
+    // presses in menus (the stick then reads centered there).
+    static P2MenuInput menu;
+    static int menu_dpad = -1;
+    if (menu_dpad < 0) { const char *v = getenv("P2_VISION_MENU_DPAD"); menu_dpad = v && !strcmp(v,"1"); }
+    uint32_t dpad = input.connected == P2_VISION_INPUT_HANDS ? 0 :
+        p2_menu_input_map(&menu,rt_ios_game_ui_visible(),menu_dpad,&input);
+#else
+    uint32_t dpad = 0;
 #endif
     // While the head drives engine angles, the engine side turns a host body
     // yaw from P2XRInput.turn_x (snap/smooth), so the guest pad's right stick
@@ -170,12 +206,20 @@ void p2_vision_input_poll(void) {
     };
     for (int axis = 0; axis < SDL_CONTROLLER_AXIS_MAX; ++axis)
         SDL_JoystickSetVirtualAxis(pad,axis,axes[axis]);
+    uint32_t pressed = 0;
     for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX; ++button) {
         uint32_t action = button == SDL_CONTROLLER_BUTTON_A ? P2_XR_JUMP :
             button == SDL_CONTROLLER_BUTTON_B ? P2_XR_CROUCH :
             button == SDL_CONTROLLER_BUTTON_X ? P2_XR_USE :
             button == SDL_CONTROLLER_BUTTON_START ? P2_XR_PAUSE : 0;
-        SDL_JoystickSetVirtualButton(pad,button,(input.buttons & action) != 0);
+        uint32_t direction = button == SDL_CONTROLLER_BUTTON_DPAD_UP ? P2_MENU_DPAD_UP :
+            button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ? P2_MENU_DPAD_DOWN :
+            button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? P2_MENU_DPAD_LEFT :
+            button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? P2_MENU_DPAD_RIGHT : 0;
+        int down = (input.buttons & action) != 0 || (dpad & direction) != 0;
+        if (down) pressed |= 1u << button;
+        SDL_JoystickSetVirtualButton(pad,button,down);
     }
+    trace_pad(controls,&input,axes,pressed);
 }
 #endif

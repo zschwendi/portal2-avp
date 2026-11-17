@@ -15,12 +15,43 @@ struct PortalLayerConfiguration: CompositorLayerConfiguration {
         configuration.colorFormat = .bgra8Unorm_srgb
         configuration.depthFormat = .depth32Float
         configuration.defaultDepthRange = SIMD2(100, max(0.05, capabilities.supportedMinimumNearPlaneDistance))
-        // Start with separate textures and no foveation. A future game bridge
-        // must explicitly support array slices/rate maps before enabling them.
+        // Default: separate textures, no foveation (the drawables were
+        // 1888x1792 per eye on device). Opt-in foveation is accepted only with
+        // the dedicated layout, where every view has its own texture and rate
+        // map (PortalRenderer.rateMap); anything else keeps the default.
+        let foveation = PortalRenderQuality.requested
+        if foveation.enabled, capabilities.supportsFoveation,
+           capabilities.supportedLayouts(options: .foveationEnabled).contains(.dedicated) {
+            configuration.isFoveationEnabled = true
+            configuration.layout = .dedicated
+            if #available(visionOS 26.0, *), let quality = foveation.quality {
+                configuration.maxRenderQuality = LayerRenderer.RenderQuality(quality)
+            }
+            return
+        }
         configuration.isFoveationEnabled = false
         let layouts = capabilities.supportedLayouts(options: [])
         configuration.layout = layouts.contains(.dedicated) ? .dedicated : .layered
     }
+}
+
+// Opt-in immersive render resolution (environment, read once):
+//   P2_XR_FOVEATION=1          foveated dedicated drawables
+//   P2_XR_RENDER_QUALITY=0...1 also raises CompositorServices render quality
+//                              (implies foveation; visionOS 26+)
+// Unsupported devices, the simulator and the layered layout keep the
+// unfoveated default. No performance claim: measure with
+// P2_VISION_FRAME_AUDIT=1 before making anything a default.
+enum PortalRenderQuality {
+    static let requested: (enabled: Bool, quality: Float?) = {
+        let environment = ProcessInfo.processInfo.environment
+        var quality: Float?
+        if let text = environment["P2_XR_RENDER_QUALITY"] {
+            if let value = Float(text), value >= 0, value <= 1 { quality = value }
+            else { NSLog("[P2XR] P2_XR_RENDER_QUALITY=%@ rejected (0...1)", text) }
+        }
+        return (environment["P2_XR_FOVEATION"] == "1" || quality != nil, quality)
+    }()
 }
 
 final class PortalRenderer: @unchecked Sendable {
@@ -180,6 +211,14 @@ final class PortalRenderer: @unchecked Sendable {
     private func run() {
         let session = self.session, attempt = self.attempt, serial = self.serial
         NSLog("[P2XR] Renderer %llu started: attempt=%llu session=%llu", serial, attempt, session)
+        let configuration = layer.configuration
+        let foveated = configuration.isFoveationEnabled && configuration.layout == .dedicated
+        if #available(visionOS 26.0, *), foveated, let quality = PortalRenderQuality.requested.quality {
+            layer.renderQuality = LayerRenderer.RenderQuality(quality)
+        }
+        NSLog("[P2XR] Layer: layout=%@ foveation=%d requested=%d quality=%@", String(describing: configuration.layout),
+              foveated ? 1 : 0, PortalRenderQuality.requested.enabled ? 1 : 0,
+              PortalRenderQuality.requested.quality.map { String($0) } ?? "default")
         DispatchQueue.main.async {
             PortalController.attach(session: session, spatial: self.spatial)
         }
@@ -214,6 +253,25 @@ final class PortalRenderer: @unchecked Sendable {
     private func invalidateTracking() {
         var invalid = P2XRFrame()
         p2_xr_publish_frame(session, &invalid)
+    }
+
+    // Foveated (dedicated) drawables carry one rasterization rate map per
+    // texture; every pass into that texture, including a clear, uses it.
+    // False only when foveation is on and the map is missing.
+    private var reportedMissingRateMap = false
+    private func applyRateMap(_ pass: MTLRenderPassDescriptor, drawable: LayerRenderer.Drawable, index: Int) -> Bool {
+        guard layer.configuration.isFoveationEnabled else { return true }
+        let maps = drawable.rasterizationRateMaps
+        if layer.configuration.layout == .dedicated, maps.indices.contains(index) {
+            pass.rasterizationRateMap = maps[index]
+            return true
+        }
+        if !reportedMissingRateMap {
+            reportedMissingRateMap = true
+            NSLog("[P2XR] Foveated drawable without a rate map for texture %ld (%ld maps, layout %@); clearing only",
+                  index, maps.count, String(describing: layer.configuration.layout))
+        }
+        return false
     }
 
     private func renderFrame() {
@@ -343,9 +401,10 @@ final class PortalRenderer: @unchecked Sendable {
             pass.depthAttachment.loadAction = .clear
             pass.depthAttachment.storeAction = .store
             pass.depthAttachment.clearDepth = 0
+            let mapped = applyRateMap(pass, drawable: drawable, index: index)
             guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { continue }
             encoder.setViewport(view.textureMap.viewport)
-            if drawCalibration {
+            if drawCalibration && mapped {
                 var mvp = drawable.computeProjection(convention: .rightUpBack, viewIndex: eye) *
                     simd_inverse(head * view.transform) * (originFromScene ?? matrix_identity_float4x4)
                 encoder.setRenderPipelineState(pipeline)
@@ -436,7 +495,13 @@ final class PortalRenderer: @unchecked Sendable {
             pass.depthAttachment.loadAction = .clear
             pass.depthAttachment.storeAction = .store
             pass.depthAttachment.clearDepth = 0
-            guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { continue }
+            // Without its rate map a foveated texture is only cleared: drawing
+            // in physical coordinates would misplace the image.
+            guard applyRateMap(pass, drawable: drawable, index: index),
+                  let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+                if let encoder = command.makeRenderCommandEncoder(descriptor: pass) { encoder.endEncoding() }
+                continue
+            }
             encoder.setViewport(view.textureMap.viewport)
             encoder.setDepthStencilState(depth)
             let texture = eye == 1 ? right : left
@@ -463,9 +528,8 @@ final class PortalRenderer: @unchecked Sendable {
             } else if menuReady, let left, let panel = menuPanel, let head = renderHead {
                 encoder.setRenderPipelineState(menuPipeline)
                 encoder.setFragmentTexture(left,index: 0)
-                // 1.6 m wide at 2 m (as before), at most 1.2 m tall.
-                var halfWidth: Float = 0.8, halfHeight = 0.8 * Float(frame.height) / Float(max(frame.width, 1))
-                if halfHeight > 0.6 { halfWidth *= 0.6 / halfHeight; halfHeight = 0.6 }
+                let half = Self.panelHalfSize(width: frame.width, height: frame.height)
+                let halfWidth = half.x, halfHeight = half.y
                 var size = matrix_identity_float4x4
                 size.columns.0.x = halfWidth
                 size.columns.1.y = halfHeight
@@ -485,6 +549,19 @@ final class PortalRenderer: @unchecked Sendable {
                 NSLog("[P2XR] Game stereo GPU submission completed: image=%llu pose=%llu eyes=2 status=%lu; physical acceptance pending",image,pose,buffer.status.rawValue)
             }
         }
+    }
+
+    // Menu panel half extents (meters at 2 m), always the engine image's own
+    // aspect (no distortion): 2.4 m wide (about 62 degrees), at most 1.35 m
+    // tall (about 37 degrees, 16:9 at full width). A 32:9 image keeps the full
+    // width and gets shorter; a tall image keeps the full height.
+    static func panelHalfSize(width: UInt32, height: UInt32) -> SIMD2<Float> {
+        let maxHalfWidth: Float = 1.2, maxHalfHeight: Float = 0.675
+        guard width > 0, height > 0 else { return SIMD2(maxHalfWidth, maxHalfHeight) }
+        let aspect = Float(width) / Float(height)
+        var half = SIMD2(maxHalfWidth, maxHalfWidth / aspect)
+        if half.y > maxHalfHeight { half = SIMD2(maxHalfHeight * aspect, maxHalfHeight) }
+        return half
     }
 
     // Yaw-only pose `distance` meters ahead of the head at head height, its +Z

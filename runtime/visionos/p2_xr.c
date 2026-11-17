@@ -1,6 +1,7 @@
 #include "p2_xr.h"
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -58,18 +59,52 @@ static int valid_pose(matrix_float4x4 m) {
     }
     return simd_dot(simd_cross(m.columns[0].xyz, m.columns[1].xyz), m.columns[2].xyz) > 0.999f;
 }
-static int valid_frame(const P2XRFrame *f) {
+// Head and eyes: strict. Any failure rejects the whole frame.
+static int valid_head(const P2XRFrame *f) {
     if (!f || !f->tracked || !f->sequence || f->eye_count != P2_XR_EYE_COUNT ||
         !isfinite(f->presentation_time) || f->presentation_time <= 0 ||
         !valid_pose(f->tracking_from_head)) return 0;
     for (unsigned e = 0; e < P2_XR_EYE_COUNT; ++e)
         if (!valid_pose(f->eyes[e].head_from_eye) || !finite_matrix(f->eyes[e].projection) ||
             fabsf(simd_determinant(f->eyes[e].projection)) < 1e-8f) return 0;
-    for (unsigned hand = 0; hand < 2; ++hand)
-        if (f->controllers[hand].tracked &&
-            (!valid_pose(f->controllers[hand].tracking_from_aim) ||
-             !valid_pose(f->controllers[hand].tracking_from_grip))) return 0;
     return 1;
+}
+static int valid_controller(const P2XRControllerPose *pose) {
+    return valid_pose(pose->tracking_from_aim) && valid_pose(pose->tracking_from_grip);
+}
+static int valid_frame(const P2XRFrame *f) {
+    if (!valid_head(f)) return 0;
+    for (unsigned hand = 0; hand < 2; ++hand)
+        if (f->controllers[hand].tracked && !valid_controller(&f->controllers[hand])) return 0;
+    return 1;
+}
+
+// Rejected frame parts (index 0 head/eyes, 1 left, 2 right controller). The
+// first few are always logged; P2_XR_POSE_TRACE=1 also logs every 900th.
+static uint64_t rejected[3];
+static void note_rejection(unsigned part, const P2XRFrame *f) {
+    uint64_t count = ++rejected[part];
+    static int trace = -1;
+    if (trace < 0) { const char *v = getenv("P2_XR_POSE_TRACE"); trace = v && !strcmp(v, "1"); }
+    if (count > 4 && !(trace && count % 900 == 0)) return;
+    static const char *names[] = {"head/eye pose", "left controller pose", "right controller pose"};
+    float worst = 0;
+    if (part) {
+        const P2XRControllerPose *pose = &f->controllers[part - 1];
+        for (unsigned c = 0; c < 3; ++c) {
+            worst = fmaxf(worst, fabsf(simd_length_squared(pose->tracking_from_aim.columns[c].xyz) - 1));
+            worst = fmaxf(worst, fabsf(simd_length_squared(pose->tracking_from_grip.columns[c].xyz) - 1));
+        }
+    }
+    if (part) fprintf(stderr, "[P2XR] Rejected %s #%llu (sequence %llu); controller dropped, head kept; worst |len^2-1|=%g\n",
+                      names[part], (unsigned long long)count, (unsigned long long)f->sequence, (double)worst);
+    else fprintf(stderr, "[P2XR] Rejected %s #%llu (sequence %llu); whole frame dropped\n",
+                 names[part], (unsigned long long)count, (unsigned long long)f->sequence);
+}
+void p2_xr_pose_rejections(uint64_t counts[3]) {
+    pthread_mutex_lock(&state_lock);
+    for (unsigned i = 0; i < 3; ++i) counts[i] = rejected[i];
+    pthread_mutex_unlock(&state_lock);
 }
 static uint64_t begin_session(int windowed) {
     pthread_mutex_lock(&state_lock);
@@ -106,7 +141,24 @@ int p2_xr_publish_frame(uint64_t session, const P2XRFrame *frame) {
     pthread_mutex_lock(&state_lock);
     int accepted = session && session == active_session && !window_session;
     if (accepted) {
-        if (!valid_frame(frame)) {
+        // A malformed Sense accessory pose makes only that controller
+        // untracked: the head and eyes keep driving input, stereo and head
+        // aim. A right controller dropped this way counts as a tracking loss
+        // (its held actions are released below).
+        P2XRFrame checked;
+        const P2XRFrame *original = frame;
+        unsigned dropped = 0;
+        int head = valid_head(frame);
+        if (head) {
+            checked = *frame;
+            for (unsigned hand = 0; hand < 2; ++hand)
+                if (checked.controllers[hand].tracked && !valid_controller(&checked.controllers[hand])) {
+                    dropped |= 1u << hand;
+                    memset(&checked.controllers[hand], 0, sizeof(checked.controllers[hand]));
+                }
+            frame = &checked;
+        } else if (frame && frame->tracked) note_rejection(0, frame);
+        if (!head) {
             memset(&latest_frame, 0, sizeof(latest_frame));
             memset(&latest_input, 0, sizeof(latest_input));
             accepted = 0;
@@ -115,6 +167,7 @@ int p2_xr_publish_frame(uint64_t session, const P2XRFrame *frame) {
         else {
             int lost = latest_frame.tracked && latest_frame.controllers[1].tracked && !frame->controllers[1].tracked;
             latest_frame = *frame;
+            for (unsigned hand = 0; hand < 2; ++hand) if (dropped >> hand & 1) note_rejection(1 + hand, original);
             if (lost && latest_input.spatial) release_held();
             last_sequence = frame->sequence;
             last_presentation_time = frame->presentation_time;

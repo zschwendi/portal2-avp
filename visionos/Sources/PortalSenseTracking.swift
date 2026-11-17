@@ -88,6 +88,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
                 let matches = resolved.filter { $0.0.inherentChirality == hand }
                 return matches.count == 1 ? matches[0] : nil
             }
+            self.reportProfiles()
             guard self.trackPoses, AccessoryTrackingProvider.isSupported, !self.bindings.isEmpty else {
                 if hadProvider { try? await self.session.run([self.world]) }
                 return
@@ -116,6 +117,43 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
     // visionOS may name a controller's face buttons a/b or x/y; with two face
     // buttons per controller both spellings are read. A connected but not yet
     // resolved pair still owns input (neutral), so a gamepad cannot fight it.
+    // Once per controller identity: the physical profile aliases this device
+    // actually exposes, against the names inputSnapshot reads.
+    @MainActor private var reportedProfiles = Set<ObjectIdentifier>()
+    @MainActor private func reportProfiles() {
+        for (accessory, controller) in bindings where reportedProfiles.insert(ObjectIdentifier(controller)).inserted {
+            let input = controller.input
+            func names<T>(_ elements: GCPhysicalInputElementCollection<T>) -> String {
+                elements.map { $0.aliases.sorted().joined(separator: "|") }.sorted().joined(separator: ", ")
+            }
+            let read: [GCButtonElementName] = [.a, .b, .x, .y, .trigger, .grip, .thumbstickButton, .menu, .options]
+            let missing = read.filter { input.buttons[$0] == nil }.map(\.rawValue) +
+                (input.dpads[.thumbstick] == nil ? [GCDirectionPadElementName.thumbstick.rawValue] : [])
+            NSLog("[P2XR] Sense %@ profile: buttons=[%@] dpads=[%@] missing-for-mapping=[%@]",
+                  accessory.inherentChirality == .left ? "left" : accessory.inherentChirality == .right ? "right" : "other",
+                  names(input.buttons), names(input.dpads), missing.joined(separator: ", "))
+        }
+    }
+
+    // P2_VISION_INPUT_TRACE=1: host Sense samples, logged when a button or a
+    // coarse axis bucket changes, at most 600 lines per process.
+    private static let traceInput = ProcessInfo.processInfo.environment["P2_VISION_INPUT_TRACE"] == "1"
+    @MainActor private static var traceLines = 0
+    @MainActor private var lastTrace: [Int32] = []
+    @MainActor private func trace(_ input: P2XRInput) {
+        guard Self.traceInput, Self.traceLines < 600 else { return }
+        func bucket(_ value: Float) -> Int32 { Int32((max(-1, min(1, value)) * 2).rounded()) }
+        let key = [Int32(bitPattern: input.buttons), Int32(input.connected), Int32(bindings.count),
+                   bucket(input.move_x), bucket(input.move_y), bucket(input.turn_x), bucket(input.look_y),
+                   bucket(input.blue_trigger), bucket(input.orange_trigger)]
+        guard key != lastTrace else { return }
+        lastTrace = key
+        Self.traceLines += 1
+        NSLog("[P2XR] Sense host sample #%d: bound=%ld connected=%u buttons=%#x move=%.2f/%.2f look=%.2f/%.2f triggers=%.2f/%.2f",
+              Self.traceLines, bindings.count, input.connected, input.buttons, input.move_x, input.move_y,
+              input.turn_x, input.look_y, input.blue_trigger, input.orange_trigger)
+    }
+
     @MainActor func inputSnapshot() -> P2XRInput? {
         guard present else { return nil }
         var input = P2XRInput()
@@ -152,6 +190,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
         }
         if leftClick && rightClick { input.buttons |= UInt32(P2_XR_WINDOW.rawValue) }
         else if leftClick { input.buttons |= UInt32(P2_XR_RECENTER.rawValue) }
+        trace(input)
         return input
     }
 

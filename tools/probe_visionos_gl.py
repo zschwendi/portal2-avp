@@ -20,7 +20,8 @@ def main():
     sources = ['tests/visionos_gl_probe.m', 'runtime/visionos/gl_vision.m',
                'runtime/visionos/sdl_vision.c', 'runtime/ios/gl_ios.m',
                'runtime/ios/essl3.c', 'runtime/ios/srgb.c',
-               'runtime/visionos/p2_xr.c','runtime/visionos/input_vision.c']
+               'runtime/visionos/p2_xr.c','runtime/visionos/input_vision.c',
+               'runtime/visionos/menu_input.c']
     objects = []
     for source in sources:
         obj = app.parent / (Path(source).stem + '.o')

@@ -74,6 +74,9 @@ int p2_xr_read(uint64_t session, P2XRFrame *frame, P2XRInput *input);
 uint64_t p2_xr_read_latest(P2XRFrame *frame, P2XRInput *input);
 uint64_t p2_xr_read_controls(P2XRInput *input);
 void p2_xr_release_input(uint64_t session);
+// Frame parts rejected so far: [0] head/eyes (whole frame dropped),
+// [1] left and [2] right Sense pose (only that controller dropped).
+void p2_xr_pose_rejections(uint64_t counts[3]);
 
 // Apple tracking: +X right, +Y up, -Z forward, meters.
 // Source: +X forward, +Y left, +Z up, game units. Recenter removes only yaw
