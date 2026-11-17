@@ -87,7 +87,11 @@ final class PortalRenderer: @unchecked Sendable {
     private var laserShown = false
     private var reportedGame = false
     private var frameLeases: [Int32] = []
-    private var frameContent = 0  // built-in drawable: 1 tracked menu panel, 2 tracked stereo world
+    private enum FrameContent: String { case menu = "menu-panel", world = "stereo-world", simulator = "simulator-panel" }
+    private var frameContent: FrameContent?
+    #if targetEnvironment(simulator)
+    private let simulatorPreview = ProcessInfo.processInfo.arguments.contains("--immersive-test")
+    #endif
     private var pauseHeld = false
     #endif
 
@@ -297,16 +301,16 @@ final class PortalRenderer: @unchecked Sendable {
         notePause()
         let leases = frameLeases, content = frameContent, session = self.session, attempt = self.attempt
         frameLeases.removeAll(keepingCapacity: true)
-        frameContent = 0
+        frameContent = nil
         command.addCompletedHandler { buffer in
             for slot in leases { p2_vision_gl_release(slot) }
-            if content != 0, buffer.status == .completed,
-               PortalPresentation.shared.completed(session, world: content == 2) {
+            if let content, buffer.status == .completed,
+               PortalPresentation.shared.completed(session, world: content == .world) {
                 NSLog("[P2XR] First valid immersive frame completed: attempt=%llu session=%llu kind=%@",
-                      attempt, session, content == 2 ? "stereo-world" : "menu-panel")
+                      attempt, session, content.rawValue)
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .portalRendererReady, object: nil,
-                        userInfo: ["attempt": attempt, "session": session, "world": content == 2])
+                        userInfo: ["attempt": attempt, "session": session, "kind": content.rawValue])
                 }
             }
             group.leave()
@@ -450,7 +454,12 @@ final class PortalRenderer: @unchecked Sendable {
 
     private func encodeGame(drawable: LayerRenderer.Drawable,command: MTLCommandBuffer,
                             tracked: Bool,currentAnchor: DeviceAnchor?,builtIn: Bool,aim: P2XRControllerPose) {
+        #if targetEnvironment(simulator)
+        let preview = simulatorPreview
+        #else
+        let preview = false
         if builtIn { requestEyeSize(drawable) }
+        #endif
         var frame = P2VisionGLFrame()
         // Only while this session owns presentation; otherwise a cleared frame.
         let leased = PortalPresentation.shared.acquireImmersive(session,&frame)
@@ -458,30 +467,35 @@ final class PortalRenderer: @unchecked Sendable {
             frame.eye_count == 2 && frame.xr_session == session && frame.render_pose.tracked != 0
         let sourceAnchor = stereo ? anchors[frame.render_pose.sequence] : nil
         let worldReady = tracked && stereo && sourceAnchor != nil
-        let menuReady = tracked && leased && frame.kind == P2_VISION_MONO.rawValue
+        let panelReady = (tracked || preview) && leased && frame.kind == P2_VISION_MONO.rawValue
         // The anchor must be the pose that rendered these pixels. A newer
         // compositor pose must never be attached to a stale engine image.
         // Overlays (menu panel, aim laser) are drawn from the attached pose.
         var renderHead: simd_float4x4?
-        #if !targetEnvironment(simulator)
+        #if targetEnvironment(simulator)
+        // Draw the actual game surface in a fixed panel for lifecycle testing.
+        // This synthetic pose stays local to the panel and never enters XR.
+        if panelReady { renderHead = matrix_identity_float4x4 }
+        #else
         if worldReady {
             drawable.deviceAnchor = sourceAnchor
             renderHead = sourceAnchor?.originFromAnchorTransform
-        } else if menuReady {
+        } else if panelReady {
             drawable.deviceAnchor = currentAnchor
             renderHead = currentAnchor?.originFromAnchorTransform
         }
         #endif
         if worldReady { menuPanel = nil }
-        else if menuReady, menuPanel == nil, let head = renderHead {
+        else if panelReady, menuPanel == nil, let head = renderHead {
             let panel = Self.panelPose(head: head, distance: 2)
             menuPanel = panel
-            NSLog("[P2XR] Menu panel world-locked 2 m ahead at (%.2f, %.2f, %.2f) m, yaw only",
-                  panel.columns.3.x, panel.columns.3.y, panel.columns.3.z)
+            NSLog("[P2XR] %@ panel placed 2 m ahead at (%.2f, %.2f, %.2f) m, yaw only",
+                  preview ? "Simulator" : "Tracked menu", panel.columns.3.x, panel.columns.3.y, panel.columns.3.z)
         }
         let laser = worldReady && renderHead != nil ? laserSegment(aim) : nil
         let left = leased ? gameTexture(frame.surface,frame: frame) : nil
         let right = stereo ? gameTexture(frame.right_surface,frame: frame) : nil
+        var eyesDrawn = 0
         for (eye,view) in drawable.views.enumerated() {
             let index = view.textureMap.textureIndex, slice = view.textureMap.sliceIndex
             let pass = MTLRenderPassDescriptor()
@@ -516,6 +530,7 @@ final class PortalRenderer: @unchecked Sendable {
                 // reprojection awaits actual engine depth export; fresh game
                 // frames still render from both complete six-DoF eye poses.
                 encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 3)
+                eyesDrawn += 1
                 if let laser, let head = renderHead {
                     var uniforms = LaserUniforms(projection: projection, eyeFromOrigin: simd_inverse(head * view.transform),
                                                  start: laser.start, end: laser.end)
@@ -525,7 +540,7 @@ final class PortalRenderer: @unchecked Sendable {
                     encoder.setFragmentBytes(&uniforms,length: MemoryLayout<LaserUniforms>.stride,index: 1)
                     encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 12)
                 }
-            } else if menuReady, let left, let panel = menuPanel, let head = renderHead {
+            } else if panelReady, let left, let panel = menuPanel, let head = renderHead {
                 encoder.setRenderPipelineState(menuPipeline)
                 encoder.setFragmentTexture(left,index: 0)
                 let half = Self.panelHalfSize(width: frame.width, height: frame.height)
@@ -536,13 +551,17 @@ final class PortalRenderer: @unchecked Sendable {
                 var mvp = projection * simd_inverse(head * view.transform) * panel * size
                 encoder.setVertexBytes(&mvp,length: MemoryLayout<simd_float4x4>.stride,index: 1)
                 encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 6)
+                eyesDrawn += 1
             }
             encoder.endEncoding()
         }
         // Released by renderFrame's completion handler, after the GPU is done.
         if leased { frameLeases.append(frame.slot) }
-        if builtIn { frameContent = worldReady ? 2 : menuReady ? 1 : 0 }
-        if worldReady && !reportedGame {
+        if builtIn && eyesDrawn > 0 && eyesDrawn == drawable.views.count {
+            if worldReady { frameContent = .world }
+            else if panelReady { frameContent = preview ? .simulator : .menu }
+        }
+        if frameContent == .world && !reportedGame {
             reportedGame = true
             let pose = frame.render_pose.sequence, image = frame.sequence
             command.addCompletedHandler { buffer in

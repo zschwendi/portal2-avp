@@ -130,8 +130,8 @@ final class PortalGameFlow: ObservableObject {
         })
         observers.append(center.addObserver(forName: .portalRendererReady, object: nil, queue: .main) { note in
             let attempt = note.userInfo?["attempt"] as? UInt64 ?? 0, session = note.userInfo?["session"] as? UInt64 ?? 0
-            let world = note.userInfo?["world"] as? Bool ?? false
-            MainActor.assumeIsolated { PortalGameFlow.shared.rendererReady(attempt: attempt, session: session, world: world) }
+            let kind = note.userInfo?["kind"] as? String ?? "unknown"
+            MainActor.assumeIsolated { PortalGameFlow.shared.rendererReady(attempt: attempt, session: session, kind: kind) }
         })
         observers.append(center.addObserver(forName: .portalRendererStopped, object: nil, queue: .main) { note in
             let attempt = note.userInfo?["attempt"] as? UInt64 ?? 0, session = note.userInfo?["session"] as? UInt64 ?? 0
@@ -258,12 +258,12 @@ final class PortalGameFlow: ObservableObject {
         log("Attempt \(attempt): immersive session \(session) owns engine frames")
     }
 
-    private func rendererReady(attempt: UInt64, session: UInt64, world: Bool) {
+    private func rendererReady(attempt: UInt64, session: UInt64, kind: String) {
         guard attempt == self.attempt, session != 0, session == rendererSession else {
             log("Ignored stale readiness: attempt \(attempt) session \(session)")
             return
         }
-        log("Attempt \(attempt): first immersive \(world ? "stereo world" : "menu panel") frame completed on the GPU (session \(session))")
+        log("Attempt \(attempt): first immersive \(kind) frame completed on the GPU (session \(session))")
         guard phase == .opening else { return }
         ready = true
         if spaceOpen && !openInFlight { present() }
