@@ -385,7 +385,8 @@ static int method_shim(CPU *c, const char *name) {
     const SteamMethodInfo *m = find_method(name);
     if (!m && virtual_bridge(c, name, table, iface)) return 1;
     if (!m) fail(c, "Steam: %s has no flat function in SDK 1.53a%s", name, "");
-    if (!m->fn) {
+    steam_method_fn fn = m->fn ? m->fn : steam_manual_method(name);   // steam_workshop.c
+    if (!fn) {
         snprintf(message, sizeof(message), "Steam: %s (vtable slot %u) is not bridged: %s", name, m->slot, m->why);
         rt_trap(c, c->eip, message);
     }
@@ -394,7 +395,7 @@ static int method_shim(CPU *c, const char *name) {
     uint32_t object = R32(self);
     void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;
     if (!host) fail(c, "Steam: %s called on an object that is not a %s proxy", name, interface_version((size_t)iface));
-    m->fn(c, host, self + 4, sret);
+    fn(c, host, self + 4, sret);
     if (m->sret) steam_pop_hidden_pointer(c);
     return 1;
 }

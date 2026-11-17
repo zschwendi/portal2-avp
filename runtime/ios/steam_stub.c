@@ -85,6 +85,31 @@ int32_t steam_stub_ticket(void *buffer, int32_t capacity) {
     return (int32_t)sizeof(magic) + 8;
 }
 
+// ---- Workshop (salles de la communauté) : pas de service hors ligne ----
+// Marshallées à la main par runtime/steam_workshop.c, donc absentes du code
+// généré. k_uAPICallInvalid / false : l'invité prend son chemin d'échec
+// (aucun abonnement, téléchargement ni nuage simulé). Les salles locales
+// passent par runtime/custom_levels.c, pas par Steam.
+static void workshop_unavailable(const char *method) {
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "[steam-stub] Workshop indisponible hors ligne (%s) : appel refusé\n", method);
+}
+EXPORT uint64_t SteamAPI_ISteamRemoteStorage_EnumeratePublishedWorkshopFiles(void *self, int32_t type, uint32_t start,
+        uint32_t count, uint32_t days, void *tags, void *user_tags) {
+    (void)self; (void)type; (void)start; (void)count; (void)days; (void)tags; (void)user_tags;
+    workshop_unavailable("EnumeratePublishedWorkshopFiles"); return 0;
+}
+EXPORT uint64_t SteamAPI_ISteamRemoteStorage_EnumerateUserSharedWorkshopFiles(void *self, uint64_t user, uint32_t start,
+        void *required, void *excluded) {
+    (void)self; (void)user; (void)start; (void)required; (void)excluded;
+    workshop_unavailable("EnumerateUserSharedWorkshopFiles"); return 0;
+}
+EXPORT bool SteamAPI_ISteamRemoteStorage_UpdatePublishedFileTags(void *self, uint64_t handle, void *tags) {
+    (void)self; (void)handle; (void)tags;
+    workshop_unavailable("UpdatePublishedFileTags"); return false;
+}
+
 // ---- crochets d'avertissement (appelés par steam.c hors code généré) ----
 EXPORT void SteamAPI_ISteamClient_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }
 EXPORT void SteamAPI_ISteamUtils_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }

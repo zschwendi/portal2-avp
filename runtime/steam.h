@@ -31,6 +31,8 @@ void steam_ret64(CPU *c, uint64_t value);                    // edx:eax
 void steam_ret_sret(CPU *c, uint32_t sret, uint64_t value);  // écrit *sret, eax = sret
 uint32_t steam_guest_string(CPU *c, const char *value);      // copie invitée stable, 0 si NULL
 uint32_t steam_proxy(CPU *c, void *host, const char *version);
+// Méthode marshallée à la main (steam_workshop.c) pour une entrée générée sans fonction ; NULL sinon.
+steam_method_fn steam_manual_method(const char *name);
 
 // Introspection pour les tests.
 const char *steam_dylib_path(void);
