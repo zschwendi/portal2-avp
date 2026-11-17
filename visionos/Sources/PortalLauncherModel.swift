@@ -151,6 +151,32 @@ enum PortalControllerRoute: Equatable, Sendable {
     }
 }
 
+// Fixed-hand Sense bindings from resolved accessory identities
+// (PortalSenseTracking). A controller can be listed before its identity
+// resolves; the refresh retries on this bounded schedule while connections are
+// unchanged, and a retry replaces the bindings only when it binds more hands.
+enum PortalSenseBinding {
+    enum Hand: Equatable, Sendable { case left, right, other }
+
+    // Seconds before each retry of a refresh that left a controller unbound.
+    static let retryDelays: [Double] = [0.5, 1, 2, 4, 8, 8]
+
+    // Indices of the one identity per hand, left first. A hand reported twice
+    // binds neither; .other never binds.
+    static func assign(_ hands: [Hand]) -> [Int] {
+        [Hand.left, .right].compactMap { hand in
+            let matches = hands.indices.filter { hands[$0] == hand }
+            return matches.count == 1 ? matches[0] : nil
+        }
+    }
+
+    // Every connected controller, up to a pair, has a hand.
+    static func complete(connected: Int, bound: Int) -> Bool { bound >= min(connected, 2) }
+
+    // The first pass always applies; a retry only when it binds more.
+    static func adopts(attempt: Int, bound: Int, current: Int) -> Bool { attempt == 0 || bound > current }
+}
+
 // Losing the controller that is playing pauses the game, once, during
 // gameplay. A spare device leaving (a DualSense while a Sense pair plays, one
 // of two gamepads) changes nothing.

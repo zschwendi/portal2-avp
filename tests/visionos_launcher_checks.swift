@@ -22,6 +22,23 @@ do {
     check(!PortalControllerRoute.singleSense.ready && !PortalControllerRoute.none.ready, "incomplete routes are not ready")
 }
 
+// A Sense identity that fails to resolve is retried (bounded) and never
+// lets a later, worse pass drop a hand already bound.
+do {
+    typealias B = PortalSenseBinding
+    check(B.assign([.right, .left]) == [1, 0], "fixed hands, not connection order")
+    check(B.assign([.left, .left, .right]) == [2], "a duplicated hand binds neither")
+    check(B.assign([.other]).isEmpty && B.assign([]).isEmpty, "unknown chirality never binds")
+    check(!B.complete(connected: 2, bound: 0) && !B.complete(connected: 2, bound: 1), "unresolved pair retries")
+    check(B.complete(connected: 2, bound: 2) && B.complete(connected: 1, bound: 1), "resolved")
+    check(B.complete(connected: 3, bound: 2) && B.complete(connected: 0, bound: 0), "at most a pair")
+    check(B.adopts(attempt: 0, bound: 0, current: 2), "a fresh refresh always applies")
+    check(B.adopts(attempt: 1, bound: 2, current: 1) && !B.adopts(attempt: 2, bound: 1, current: 1) &&
+          !B.adopts(attempt: 3, bound: 0, current: 1), "a retry never drops a bound hand")
+    check(!B.retryDelays.isEmpty && B.retryDelays.allSatisfy { $0 > 0 } && B.retryDelays.reduce(0, +) <= 30,
+          "bounded retry")
+}
+
 // Only losing the controller that plays pauses, and only during gameplay.
 do {
     func pauses(_ owner: PortalRouteLoss.Owner, spatial: Bool = false, pad: Bool = false,

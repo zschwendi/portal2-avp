@@ -74,36 +74,65 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
             // Serialize provider changes, including a cancelled run that is
             // still returning from ARKit. A late connection cannot win.
             await previous?.value
-            guard let self, !self.stopped, self.generation == revision, !Task.isCancelled else { return }
-            var resolved: [(Accessory, GCController)] = []
-            for controller in controllers {
-                do {
-                    let accessory = try await Self.resolve(ObjectIdentifier(controller))
-                    guard !Task.isCancelled else { return }
-                    resolved.append((accessory, controller))
-                } catch { NSLog("[P2XR] Sense identity unavailable: %@", String(describing: error)) }
+            // A listed controller whose identity has not resolved yet would
+            // leave the pair owning neutral input until the next connection
+            // change. Retry, bounded, while this refresh is current.
+            for attempt in 0...PortalSenseBinding.retryDelays.count {
+                if attempt > 0 { try? await Task.sleep(for: .seconds(PortalSenseBinding.retryDelays[attempt - 1])) }
+                guard let self, self.current(revision) else { return }
+                if await self.bind(controllers, attempt: attempt, revision: revision, hadProvider: hadProvider) { return }
             }
-            guard !self.stopped, self.generation == revision, !Task.isCancelled else { return }
-            self.bindings = [Accessory.Chirality.left, .right].compactMap { hand in
-                let matches = resolved.filter { $0.0.inherentChirality == hand }
-                return matches.count == 1 ? matches[0] : nil
-            }
-            self.reportProfiles()
-            guard self.trackPoses, AccessoryTrackingProvider.isSupported, !self.bindings.isEmpty else {
-                if hadProvider { try? await self.session.run([self.world]) }
-                return
-            }
-            let authorization = await self.session.requestAuthorization(for: AccessoryTrackingProvider.requiredAuthorizations)
-            guard authorization.values.allSatisfy({ $0 == .allowed }),
-                  !self.stopped, self.generation == revision, !Task.isCancelled else { return }
-            let next = AccessoryTrackingProvider(accessories: self.bindings.map { $0.0 })
-            do {
-                try await self.session.run([self.world, next])
-                guard !self.stopped, self.generation == revision, !Task.isCancelled else { return }
-                self.lock.withLock { self.provider = next }
-                NSLog("[P2XR] Sense tracking provider running for %lu fixed-hand devices; gameplay acceptance pending", self.bindings.count)
-            } catch { NSLog("[P2XR] Sense tracking failed: %@", String(describing: error)) }
+            guard let self, self.current(revision) else { return }
+            NSLog("[P2XR] Sense identity incomplete after %ld attempts: %ld of %ld controllers bound; waiting for a reconnect",
+                  PortalSenseBinding.retryDelays.count + 1, self.bindings.count, controllers.count)
         }
+    }
+
+    @MainActor private func current(_ revision: Int) -> Bool {
+        !stopped && generation == revision && !Task.isCancelled
+    }
+
+    // One resolution pass. True when finished: every connected controller (up
+    // to a pair) has a hand, or this refresh is no longer current.
+    @MainActor private func bind(_ controllers: [GCController], attempt: Int, revision: Int, hadProvider: Bool) async -> Bool {
+        var resolved: [(Accessory, GCController)] = []
+        for controller in controllers {
+            do {
+                let accessory = try await Self.resolve(ObjectIdentifier(controller))
+                guard current(revision) else { return true }
+                resolved.append((accessory, controller))
+            } catch { NSLog("[P2XR] Sense identity unavailable (attempt %ld): %@", attempt + 1, String(describing: error)) }
+        }
+        guard current(revision) else { return true }
+        let hands = resolved.map { item -> PortalSenseBinding.Hand in
+            item.0.inherentChirality == .left ? .left : item.0.inherentChirality == .right ? .right : .other
+        }
+        let next = PortalSenseBinding.assign(hands).map { resolved[$0] }
+        let done = PortalSenseBinding.complete(connected: controllers.count, bound: next.count)
+        if !done {
+            NSLog("[P2XR] Sense attempt %ld: %ld connected, %ld resolved, %ld bound (left=%ld right=%ld other=%ld)",
+                  attempt + 1, controllers.count, resolved.count, next.count, hands.filter { $0 == .left }.count,
+                  hands.filter { $0 == .right }.count, hands.filter { $0 == .other }.count)
+        }
+        // A retry that binds no more keeps the current bindings and provider.
+        guard PortalSenseBinding.adopts(attempt: attempt, bound: next.count, current: bindings.count) else { return done }
+        bindings = next
+        if attempt > 0 { NSLog("[P2XR] Sense identity retry %ld bound %ld of %ld controllers", attempt, next.count, controllers.count) }
+        reportProfiles()
+        guard trackPoses, AccessoryTrackingProvider.isSupported, !bindings.isEmpty else {
+            if hadProvider && attempt == 0 { try? await session.run([world]) }
+            return done
+        }
+        let authorization = await session.requestAuthorization(for: AccessoryTrackingProvider.requiredAuthorizations)
+        guard authorization.values.allSatisfy({ $0 == .allowed }), current(revision) else { return done || !current(revision) }
+        let provider = AccessoryTrackingProvider(accessories: bindings.map { $0.0 })
+        do {
+            try await session.run([world, provider])
+            guard current(revision) else { return true }
+            lock.withLock { self.provider = provider }
+            NSLog("[P2XR] Sense tracking provider running for %lu fixed-hand devices; gameplay acceptance pending", bindings.count)
+        } catch { NSLog("[P2XR] Sense tracking failed: %@", String(describing: error)) }
+        return done
     }
 
     // PSVR2 Sense mapping by fixed hardware chirality. PS/Home and share are
