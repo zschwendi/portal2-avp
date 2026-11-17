@@ -26,6 +26,7 @@ targets:
     info:
       path: Game-Info.plist
       properties:
+        GCSupportsControllerUserInteraction: true
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
           - ProfileName: SpatialGamepad
@@ -109,6 +110,7 @@ targets:
     info:
       path: RendererCheck-Info.plist
       properties:
+        GCSupportsControllerUserInteraction: true
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
           - ProfileName: SpatialGamepad
