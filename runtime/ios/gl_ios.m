@@ -9,6 +9,7 @@
 #import <OpenGLES/EAGL.h>
 #import <UIKit/UIKit.h>
 #include <OpenGLES/ES3/gl.h>
+#include "settings.h"
 #endif
 #include <math.h>
 #include <SDL.h>
@@ -774,13 +775,8 @@ void *rt_ios_gl_share_group(void *context) {
     return context ? (__bridge void *)((__bridge EAGLContext *)context).sharegroup : NULL;
 }
 
-// Écran ProMotion : sans demande explicite, iOS laisse l'écran à 60 Hz et la
-// présentation du renderbuffer y est cadencée (mesuré : 60,0 i/s quels que
-// soient l'antialiasing, l'échelle et la synchro du jeu). Un CADisplayLink
-// qui demande jusqu'à 120 Hz fait monter la fréquence de l'écran ; il ne fait
-// rien d'autre. Avec CADisableMinimumFrameDurationOnPhone (Info.plist).
-// Désactivé par défaut : pour jouer, 60 i/s réguliers (avec MSAA) valent mieux
-// que des sauts entre 60 et 120 ; P2_IOS_MAX_FPS=120 le réactive.
+// Request the same display cadence as the engine's frame cap. ProMotion can
+// still use a lower rate based on the display and current system conditions.
 @interface P2FrameRate : NSObject
 - (void)tick:(CADisplayLink *)link;
 @end
@@ -799,12 +795,11 @@ void *rt_ios_gl_share_group(void *context) {
 @end
 static void request_frame_rate(void) {
     static CADisplayLink *link;
-    if (link) return;
-    const char *e = getenv("P2_IOS_MAX_FPS");
-    float wanted = e && atof(e) > 0 ? fminf((float)atof(e), (float)UIScreen.mainScreen.maximumFramesPerSecond) : 60;
-    if (wanted <= 60) return;
+    if (link || getenv("P2_IOS_NO_PRESENT")) return;
+    int wanted = rt_ios_display_frame_rate();
+    if (wanted <= 60 && !rt_ios_is_ipad()) return;
     link = [CADisplayLink displayLinkWithTarget:[P2FrameRate new] selector:@selector(tick:)];
-    link.preferredFrameRateRange = CAFrameRateRangeMake(wanted, wanted, wanted);   // avec un minimum de 60, iOS restait à 60
+    link.preferredFrameRateRange = CAFrameRateRangeMake(wanted, wanted, wanted);
     // Sur son propre thread : la boucle du thread principal n'est servie que
     // quand le jeu lit ses événements (~20 fois/s mesuré), et iOS ignore une
     // demande dont les rappels ne suivent pas (écran resté à 60 Hz hors toucher).
@@ -815,7 +810,7 @@ static void request_frame_rate(void) {
     thread.name = @"P2FrameRate";
     thread.qualityOfService = NSQualityOfServiceUserInteractive;
     [thread start];
-    fprintf(stderr, "[gl-ios] fréquence d'affichage demandée : jusqu'à %.0f Hz\n", wanted);
+    fprintf(stderr, "[gl-ios] fréquence d'affichage demandée : jusqu'à %d Hz\n", wanted);
 }
 
 float rt_ios_render_scale(void);   // sdl_ios.m
@@ -835,7 +830,7 @@ SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
         // SDL recrée ses renderbuffers à la taille voulue (layoutSubviews).
         UIView *view = info.info.uikit.window.rootViewController.view;
         CGFloat wanted = rt_ios_render_scale();
-        if (view && wanted > 1 && fabs(view.contentScaleFactor - wanted) > 0.01) {
+        if (view && fabs(view.contentScaleFactor - wanted) > 0.01) {
             view.contentScaleFactor = wanted;
             [view setNeedsLayout];
             [view layoutIfNeeded];

@@ -57,7 +57,7 @@ run)
   shift
   SECONDS_MAX=${1:-180}; shift || true
   dc device process launch --terminate-existing \
-    --environment-variables "$(env_json P2_LOG_FILE=Documents/game.log P2_FRAME_LOG=1 "$@")" $APP_ID
+    --environment-variables "$(env_json P2_IOS_SKIP_LAUNCHER=1 P2_LOG_FILE=Documents/game.log P2_FRAME_LOG=1 "$@")" $APP_ID
   sleep "$SECONDS_MAX"
   mkdir -p build/ios/device
   dc device copy from --domain-type appDataContainer --domain-identifier $APP_ID \

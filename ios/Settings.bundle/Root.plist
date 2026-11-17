@@ -14,15 +14,16 @@
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
-			<string>2</string>
+			<string>auto</string>
 			<key>Key</key>
 			<string>P2ResolutionScale</string>
 			<key>Title</key>
 			<string>Résolution</string>
 			<key>Titles</key>
 			<array>
-				<string>Native (×3)</string>
-				<string>×2 (recommandé)</string>
+				<string>Automatique</string>
+				<string>Native</string>
+				<string>×2</string>
 				<string>×1,5</string>
 				<string>×1</string>
 			</array>
@@ -30,6 +31,7 @@
 			<string>PSMultiValueSpecifier</string>
 			<key>Values</key>
 			<array>
+				<string>auto</string>
 				<string>native</string>
 				<string>2</string>
 				<string>1.5</string>
@@ -38,20 +40,22 @@
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
-			<string>60</string>
+			<string>auto</string>
 			<key>Key</key>
 			<string>P2MaxFPS</string>
 			<key>Title</key>
 			<string>Images par seconde</string>
 			<key>Titles</key>
 			<array>
-				<string>60 (recommandé)</string>
+				<string>Automatique</string>
+				<string>60</string>
 				<string>120 (ProMotion)</string>
 			</array>
 			<key>Type</key>
 			<string>PSMultiValueSpecifier</string>
 			<key>Values</key>
 			<array>
+				<string>auto</string>
 				<string>60</string>
 				<string>120</string>
 			</array>

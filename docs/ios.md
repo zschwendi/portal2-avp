@@ -60,7 +60,17 @@ The game language is written into the app's `launch.args` when it is built
 (`-language <name>`, chosen as on the Mac: see "Game language" in the README).
 To change it, set `"language"` in `config/local.json` and rebuild.
 
-## Settings (iOS Settings app)
+## Settings
+
+On iPad, open Portal 2 to choose a 120 or 60 FPS limit under **Settings**, then
+tap **Play**. The choice is saved and applies to that launch. The default is
+120 FPS, capped at the display's maximum refresh rate. Native resolution and
+high texture detail with 16× anisotropic filtering are requested by default on
+physical iPads. Game launch arguments can override these settings.
+
+Use `P2_IOS_SKIP_LAUNCHER=1` for an unattended launch. Explicit command-line
+launches and launch files with `+map` also go straight to the content check
+and engine.
 
 "Portal 2" page in the Settings app (`ios/Settings.bundle`, copied into the app
 by `tools/build_ios.py`). At launch, `runtime/ios/settings.c` turns each
@@ -72,8 +82,8 @@ The setting titles below are the ones shown in the app, which is still in French
 
 | Setting | Variable | Values |
 |---|---|---|
-| Résolution (Resolution) | `P2_IOS_RENDER_SCALE` (+ the game's `-w`/`-h`) | native, ×2 (default), ×1.5, ×1 |
-| Images par seconde (Frames per second) | `P2_IOS_MAX_FPS` | 60 (default), 120 |
+| Résolution (Resolution) | `P2_IOS_RENDER_SCALE` (+ the game's `-w`/`-h`) | automatic (native on iPad, up to ×2 on iPhone, ×1 on simulator), native, ×2, ×1.5, ×1 |
+| Images par seconde (Frames per second) | `P2_IOS_MAX_FPS` | automatic (120 on iPad, 60 on iPhone), 60, 120 |
 | Compteur d'images (FPS counter) | `P2_SHOW_FPS` | shown by default; tapping the top-left corner shows or hides it (choice is remembered) |
 | Commandes à l'écran (On-screen controls) | `P2_TOUCH_CONTROLS` | automatic (hidden when a controller is connected), always, never |
 | Caméra en trackpad (Trackpad camera) | key `P2TouchTrackpad` | also toggled by the button at the bottom left |
@@ -189,11 +199,11 @@ a_z < 0 at the peak, a tap on the screen a_z > 0.
 Uncapped by the display (`tools/ios_bench.py`, `P2_IOS_NO_PRESENT=1`),
 sp_a2_laser_stairs at the spawn point: native 2796×1290 90 fps (4× MSAA) or
 94 (without); scale 2 (1864×860) 154; 1.5 178. The GPU is the bottleneck: scale 2 is the
-default on device. Heavy view of the same room (setpos -188.94 -396.92
+default on iPhone. Heavy view of the same room (setpos -188.94 -396.92
 -31.97): ~117 fps sustained at scale 2 with 4× MSAA (~150 before the
-phone heats up). For playing: 60 Hz by default, steady;
-`P2_IOS_MAX_FPS=120` requests 120 Hz (frame rate then between 60 and 120). The ProMotion display rounds the displayed frame rate (120, 60,
-40…): a frame taking more than 8.3 ms is shown at 60.
+phone heats up). The requested rate sets the engine cap and display-link target
+on iPad. ProMotion can use a lower rate depending on render cost, system
+conditions, and display capability.
 
 Lessons: the translated game code costs little; the cost is in Apple's ES
 driver, which waits for the GPU on any write to an in-flight buffer and

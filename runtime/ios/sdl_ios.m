@@ -9,16 +9,27 @@
 #include <string.h>
 #include "settings.h"
 
-// Échelle points -> pixels : celle de l'écran sur appareil. Sur simulateur
-// (rendu OpenGL ES logiciel, 0,5 image/s en 2622×1206), 1 par défaut.
-// Sur appareil, 2 par défaut (voir plus bas). P2_IOS_RENDER_SCALE=1, =native
-// ou une valeur entre les deux (1,5…) : moins de pixels, agrandis par l'écran
-// (la vue GL prend cette échelle : rt_ios_gl_create_context, gl_ios.m).
+int rt_ios_is_ipad(void) { return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad; }
+
+int rt_ios_uses_native_resolution_by_default(void) {
+    return !TARGET_OS_SIMULATOR && rt_ios_is_ipad();
+}
+
+int rt_ios_display_frame_rate(void) {
+    __block int maximum;
+    if ([NSThread isMainThread]) maximum = (int)UIScreen.mainScreen.maximumFramesPerSecond;
+    else dispatch_sync(dispatch_get_main_queue(), ^{ maximum = (int)UIScreen.mainScreen.maximumFramesPerSecond; });
+    int requested = rt_ios_requested_frame_rate(rt_ios_is_ipad(), getenv(P2_IOS_FRAME_RATE_ENV));
+    return rt_ios_frame_rate_for_screen(requested, maximum);
+}
+
+// Convert points to render pixels. Physical iPad uses the full display; keep the
+// software OpenGL simulator at 1× and the iPhone performance default at 2×.
 float rt_ios_render_scale(void) {
     static float scale;
     if (scale > 0) return scale;
     const char *e = getenv("P2_IOS_RENDER_SCALE");
-    int native_requested = e && !strcmp(e, "native");
+    int native_requested = e && *e ? !strcmp(e, "native") : rt_ios_uses_native_resolution_by_default();
     float requested = e && *e && !native_requested ? (float)atof(e) : 0;
     if (e && *e && !native_requested && requested <= 1.0f) return scale = 1.0f;
 #if TARGET_OS_SIMULATOR

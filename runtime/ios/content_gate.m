@@ -11,6 +11,7 @@
 #include <string.h>
 #include "content_check.h"
 #include "content_gate.h"
+#include "settings.h"
 
 // Textes : français si c'est la première langue de l'appareil, sinon anglais
 // (comme la page Réglages du jeu, en français).
@@ -33,13 +34,15 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 @property(nonatomic, readonly) BOOL passed;
 - (instancetype)initWithRoots:(const char *const *)roots;
 - (BOOL)check:(const char *)trigger;
+@property(nonatomic) BOOL showLauncher;
+@property(nonatomic) BOOL frameRateOverridden;
 @end
 
 @implementation P2ContentGateController {
     char *_roots[4];  // game, linux, prep, documents (copies; NULL: absente)
     BOOL _documentsLayout;  // racines par défaut (Documents/game, linux, prep) : liste des fichiers vérifiée aussi
     P2ContentReport _report;
-    UILabel *_title, *_detail, *_names, *_space, *_help, *_status;
+    UILabel *_title, *_detail, *_names, *_space, *_heading, *_help, *_status;
     UIButton *_button;
     id _observer;
 }
@@ -72,6 +75,7 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 - (BOOL)check:(const char *)trigger {
     if (_documentsLayout) p2_content_check(_roots[3], &_report);
     else p2_content_check_roots(_roots[0], _roots[1], _roots[2], &_report);
+    _passed = _report.complete && (!self.showLauncher || !strcmp(trigger, "play"));
     if (_roots[3]) {
         NSString *documents = [NSString stringWithUTF8String:_roots[3]];
         NSArray<NSURLResourceKey> *keys = @[NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeTotalCapacityKey];
@@ -89,7 +93,7 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
             .app_version = [version isKindOfClass:NSString.class] ? [version UTF8String] : NULL,
             .app_build = [build isKindOfClass:NSString.class] ? [build UTF8String] : NULL,
             .trigger = trigger,
-            .engine_started = _report.complete,  // complet : main_ios.c lance le moteur juste après
+            .engine_started = _passed,  // main_ios.c lance le moteur juste après
         };
         char path[1024];
         if (snprintf(path, sizeof(path), "%s/%s", _roots[3], P2_CONTENT_STATUS_FILE) < (int)sizeof(path) &&
@@ -105,12 +109,15 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
             _report.manifest_files, _report.manifest_wrong_size, _report.maps_missing ? "manquante" : "présente ou non requise",
             (long long)_report.missing_bytes, (long long)_report.elapsed_us, _report.names ? " ; premier : " : "",
             p2_content_report_name(&_report, 0));
-    _passed = _report.complete != 0;
     if (self.isViewLoaded) [self render];
     return _passed;
 }
 
 - (void)checkAgain {
+    if (self.showLauncher && _report.complete) {
+        [self check:"play"];
+        return;
+    }
     _button.enabled = NO;
     _status.text = TEXT(@"Vérification…", @"Checking…");
     // Après l'affichage du libellé : la vérification bloque le thread principal
@@ -119,6 +126,13 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 }
 
 - (void)checkAgainNow { [self check:"check-again"]; }
+
+- (void)changeFrameRate:(UISegmentedControl *)sender {
+    if (self.frameRateOverridden || sender.selectedSegmentIndex == UISegmentedControlNoSegment) return;
+    NSString *value = sender.selectedSegmentIndex == 0 ? @"120" : @"60";
+    [NSUserDefaults.standardUserDefaults setObject:value forKey:@(P2_IOS_FRAME_RATE_KEY)];
+    setenv(P2_IOS_FRAME_RATE_ENV, value.UTF8String, 1);
+}
 
 - (UILabel *)label:(UIFont *)font color:(UIColor *)color {
     UILabel *label = [[UILabel alloc] init];
@@ -147,8 +161,8 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     _detail = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody] color:UIColor.labelColor];
     _names = [self label:[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular] color:UIColor.secondaryLabelColor];
     _space = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:UIColor.secondaryLabelColor];
-    UILabel *heading = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:UIColor.labelColor];
-    heading.text = TEXT(@"Copier les fichiers du jeu depuis le Mac", @"Copy the game files from your Mac");
+    _heading = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:UIColor.labelColor];
+    _heading.text = TEXT(@"Copier les fichiers du jeu depuis le Mac", @"Copy the game files from your Mac");
     _help = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:UIColor.secondaryLabelColor];
     _status = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote] color:UIColor.secondaryLabelColor];
 
@@ -164,9 +178,31 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     row.alignment = UIStackViewAlignmentCenter;
     row.spacing = 16;
 
-    for (UIView *view in @[_title, _detail, _names, _space, heading, _help, row]) [stack addArrangedSubview:view];
+    for (UIView *view in @[_title, _detail, _names, _space, _heading, _help, row]) [stack addArrangedSubview:view];
     [stack setCustomSpacing:24 afterView:_space];
     [stack setCustomSpacing:24 afterView:_help];
+    if (self.showLauncher) {
+        UILabel *settings = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]
+                                 color:UIColor.labelColor];
+        settings.text = TEXT(@"Réglages", @"Settings");
+        UILabel *frameRate = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody]
+                                  color:UIColor.labelColor];
+        frameRate.text = TEXT(@"Limite d’images par seconde", @"Frame rate limit");
+        UISegmentedControl *choice = [[UISegmentedControl alloc] initWithItems:@[
+            TEXT(@"120 i/s", @"120 FPS"), TEXT(@"60 i/s", @"60 FPS")
+        ]];
+        choice.accessibilityLabel = frameRate.text;
+        choice.selectedSegmentIndex = rt_ios_requested_frame_rate(1, getenv(P2_IOS_FRAME_RATE_ENV)) == 60 ? 1 : 0;
+        choice.enabled = !self.frameRateOverridden;
+        [choice addTarget:self action:@selector(changeFrameRate:) forControlEvents:UIControlEventValueChanged];
+        UIStackView *frameRateRow = [[UIStackView alloc] initWithArrangedSubviews:@[frameRate, choice]];
+        frameRateRow.alignment = UIStackViewAlignmentCenter;
+        frameRateRow.spacing = 16;
+        [choice setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [stack addArrangedSubview:settings];
+        [stack addArrangedSubview:frameRateRow];
+        [stack setCustomSpacing:32 afterView:row];
+    }
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     NSLayoutConstraint *width = [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-64];
@@ -216,6 +252,16 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 - (void)render {
     const P2ContentReport *r = &_report;
     BOOL fr = french();
+    BOOL ready = r->complete != 0;
+    for (UILabel *label in @[_detail, _names, _space, _heading, _help, _status]) label.hidden = ready;
+    UIButtonConfiguration *configuration = _button.configuration;
+    configuration.title = ready ? TEXT(@"Jouer", @"Play") : TEXT(@"Vérifier à nouveau", @"Check again");
+    _button.configuration = configuration;
+    _button.enabled = YES;
+    if (ready) {
+        _title.text = @"Portal 2";
+        return;
+    }
     NSString *model = UIDevice.currentDevice.model;  // « iPad », « iPhone »
     BOOL nothing = r->required_missing >= 3;
     _title.text = nothing ?
@@ -292,17 +338,19 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     NSString *time = [NSDateFormatter localizedStringFromDate:NSDate.date dateStyle:NSDateFormatterNoStyle
                                                     timeStyle:NSDateFormatterMediumStyle];
     _status.text = [NSString stringWithFormat:TEXT(@"Vérifié à %@ : toujours incomplet.", @"Checked at %@: still incomplete."), time];
-    _button.enabled = YES;
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 @end
 
-void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep, const char *documents) {
+void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
+                         const char *documents, int show_launcher, int frame_rate_overridden) {
     @autoreleasepool {
         const char *roots[4] = {game, linux_root, prep, documents};
         P2ContentGateController *gate = [[P2ContentGateController alloc] initWithRoots:roots];
+        gate.showLauncher = show_launcher;
+        gate.frameRateOverridden = frame_rate_overridden;
         if ([gate check:"launch"]) return;
         // SDL_main tourne déjà dans la boucle d'UIKit (cycle de vie classique,
         // sans UIScene) : une fenêtre à nous, et la boucle d'exécution tourne

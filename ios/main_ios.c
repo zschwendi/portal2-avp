@@ -27,6 +27,16 @@ int p2_main(int argc, char **argv);
 static char *arguments[256];
 static int count;
 static void push(const char *value) { if (count < 255) arguments[count++] = strdup(value); }
+static int has_argument(const char *option) {
+    for (int i = 1; i < count; ++i)
+        if (!strcmp(arguments[i], option)) return 1;
+    return 0;
+}
+static void push_default(const char *option, const char *value) {
+    if (count + 2 >= 256 || has_argument(option)) return;
+    push(option);
+    push(value);
+}
 
 static void read_launch_file(const char *bundle) {
     char path[PATH_MAX], line[PATH_MAX];
@@ -42,6 +52,7 @@ static void read_launch_file(const char *bundle) {
 
 int main(int argc, char **argv) {
     // Réglages de l'app Réglages d'iOS : avant tout le reste (P2Log pose P2_LOG_FILE).
+    int frame_rate_overridden = getenv(P2_IOS_FRAME_RATE_ENV) != NULL;
     char settings[1024];
     int applied = rt_ios_settings_load(settings, sizeof(settings));
     // Journal fiable : la console de simctl perd la fin quand le processus meurt.
@@ -107,7 +118,11 @@ int main(int argc, char **argv) {
                 roots[r] = folders[r];
             }
         }
-        rt_ios_content_gate(roots[0], roots[1], roots[2], documents);
+        const char *skip = getenv("P2_IOS_SKIP_LAUNCHER");
+        int show_launcher = argc <= 1 && rt_ios_is_ipad() && !(skip && !strcmp(skip, "1")) &&
+                            !getenv("P2_IOS_NO_PRESENT") && !getenv("P2_TOUCH_TEST_CLICK") &&
+                            !getenv("P2_TOUCH_TEST_MOVE") && !has_argument("+map");
+        rt_ios_content_gate(roots[0], roots[1], roots[2], documents, show_launcher, frame_rate_overridden);
     }
     // Options du runtime absentes : dossiers de Documents (sur appareil, les
     // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles
@@ -132,19 +147,34 @@ int main(int argc, char **argv) {
             count += 2;
         }
     }
-    // Échelle de rendu choisie (Réglages ou P2_IOS_RENDER_SCALE) : la
-    // résolution du jeu suit, sinon video.txt garderait l'ancienne.
-    if (getenv("P2_IOS_RENDER_SCALE") && count + 4 < 256) {
-        int present = 0;
-        for (int i = 1; i < count; ++i) present |= !strcmp(arguments[i], "-w") || !strcmp(arguments[i], "-width");
+    // Match the guest's viewport to the selected drawable. Otherwise an
+    // older video.txt can leave the game rendering at a lower resolution.
+    const char *scale = getenv("P2_IOS_RENDER_SCALE");
+    int native_default = rt_ios_uses_native_resolution_by_default();
+    if (((scale && *scale) || native_default) && count + 4 < 256) {
+        int present = has_argument("-w") || has_argument("-width") ||
+                      has_argument("-h") || has_argument("-height");
         int w = 0, h = 0;
         if (!present) rt_ios_render_size(&w, &h);
         if (w > 0 && h > 0) {
             char value[16];
             push("-w"); snprintf(value, sizeof(value), "%d", w); push(value);
             push("-h"); snprintf(value, sizeof(value), "%d", h); push(value);
-            fprintf(stderr, "[ios] résolution %dx%d (échelle %s)\n", w, h, getenv("P2_IOS_RENDER_SCALE"));
+            fprintf(stderr, "[ios] résolution %dx%d (échelle %s)\n", w, h, scale && *scale ? scale : "native");
         }
+    }
+    const char *frame_rate = getenv(P2_IOS_FRAME_RATE_ENV);
+    if (!getenv("P2_IOS_NO_PRESENT") && (rt_ios_is_ipad() || frame_rate)) {
+        int requested = rt_ios_display_frame_rate();
+        char value[16];
+        snprintf(value, sizeof(value), "%d", requested);
+        push_default("+fps_max", value);
+        push_default("+fps_max_splitscreen", value);
+        fprintf(stderr, "[ios] frame rate target: %d FPS\n", requested);
+    }
+    if (native_default) {
+        push_default("+mat_picmip", "0");      // High texture detail from the original assets.
+        push_default("+mat_forceaniso", "16"); // Preserve detail at grazing angles.
     }
     arguments[count] = NULL;
     fprintf(stderr, "[ios] %d arguments, Steam : stub iOS (%s)\n", count, exe);

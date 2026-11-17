@@ -15,7 +15,7 @@
 // « auto » : variable laissée absente (défaut du code).
 const rt_ios_setting rt_ios_settings[] = {
     {"P2ResolutionScale", "P2_IOS_RENDER_SCALE", NULL, NULL},   // native, 2, 1.5, 1
-    {"P2MaxFPS", "P2_IOS_MAX_FPS", NULL, NULL},                 // 60, 120
+    {P2_IOS_FRAME_RATE_KEY, P2_IOS_FRAME_RATE_ENV, NULL, NULL},   // 60, 120
     {"P2ShowFPS", "P2_SHOW_FPS", "1", "0"},
     {"P2TouchControls", "P2_TOUCH_CONTROLS", NULL, NULL},       // auto, 1, 0
     {"P2TouchLook", "P2_TOUCH_LOOK", NULL, NULL},               // vitesse de la caméra
@@ -27,6 +27,16 @@ const rt_ios_setting rt_ios_settings[] = {
     {"P2Log", "P2_LOG_FILE", "Documents/game.log", NULL},
 };
 const int rt_ios_settings_count = (int)(sizeof(rt_ios_settings) / sizeof(*rt_ios_settings));
+
+int rt_ios_requested_frame_rate(int ipad, const char *preference) {
+    if (preference && !strcmp(preference, "60")) return 60;
+    if (preference && !strcmp(preference, "120")) return 120;
+    return ipad ? 120 : 60;
+}
+
+int rt_ios_frame_rate_for_screen(int requested, int screen_maximum) {
+    return screen_maximum > 0 && screen_maximum < requested ? screen_maximum : requested;
+}
 
 int rt_ios_settings_apply(rt_ios_settings_get get, void *ctx, char *summary, size_t size) {
     int applied = 0;
