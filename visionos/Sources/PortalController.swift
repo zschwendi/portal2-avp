@@ -1,10 +1,19 @@
 import Foundation
 import GameController
+import simd
 
 // GameController handlers publish complete snapshots; disconnect/background
 // releases every action. One owner publishes per tick (PortalInputArbiter):
 // a connected Sense pair, else the gamepad while in use, else immersive hands.
-// Hands are optional; every action stays reachable from a controller.
+// A lone Sense controller owns input only without a gamepad
+// (PortalControllerRoute). Hands are optional; every action stays reachable
+// from a controller.
+//
+// Losing the playing controller during gameplay presses pause once (which
+// also returns immersive play to the window, PortalGameFlow). Afterwards, and
+// after the Library covered the game, nothing reaches the game until every
+// control is released, so a reconnect or a launcher press never moves, fires
+// or picks a menu item by itself.
 //
 // Standard gamepad / DualSense (PS/Home and Create stay with the system):
 //   left stick: move              right stick: turn (X) / look (Y)
@@ -28,11 +37,18 @@ final class PortalController {
     // session has had no gamepad and no Sense controller for this long.
     private static let handsAfterNoController = 1.0
     private var noControllerSince: Double?
+    private var pauseUntil: Double?
+    private var awaitingRelease = false
+    private static let pausePress = 0.2
     private static var active: PortalController?
+    // The Library covers the running game: input stays released.
+    private static var launcherVisible = false
 
     init(session: UInt64, spatial: (any PortalSpatialSource)?) {
         self.session = session
         self.spatial = spatial
+        // A session change (window <-> immersive) never carries a held press over.
+        awaitingRelease = Self.active?.awaitingRelease ?? false
         Self.active?.stop()
         Self.active = self
         let center = NotificationCenter.default
@@ -42,8 +58,15 @@ final class PortalController {
         observers.append(center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] note in
             // The departing controller may still be listed (with its last,
             // possibly held, values) when this arrives: never select it again.
-            let gone = (note.object as? GCController).map { ObjectIdentifier($0) }
-            Task { @MainActor [weak self] in self?.selectController(excluding: gone) }
+            let device = note.object as? GCController
+            let gone = device.map { ObjectIdentifier($0) }
+            let sense = device.map(Self.isSense) ?? false
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.routeLost(selectedGamepad: gone != nil && gone == self.controller.map { ObjectIdentifier($0) },
+                               spatial: sense)
+                self.selectController(excluding: gone)
+            }
         })
         selectController()
         // Poll complete state, including held buttons after tracking resumes.
@@ -60,7 +83,7 @@ final class PortalController {
         let controllers = GCController.controllers().filter { ObjectIdentifier($0) != gone }
         Self.reportControllers()
         controller = controllers.first {
-            if #available(visionOS 26.0, *), $0.productCategory == GCProductCategorySpatialController { return false }
+            if Self.isSense($0) { return false }
 #if targetEnvironment(simulator)
             // CoreSimulator exposes this synthetic MFi pad even when the Mac
             // has no controller. Only the explicit automated input audit
@@ -82,13 +105,59 @@ final class PortalController {
         }
     }
 
+    private func routeLost(selectedGamepad: Bool, spatial: Bool) {
+        let owner: PortalRouteLoss.Owner
+        switch arbiter.owner {
+        case .spatial: owner = .spatial
+        case .gamepad: owner = .gamepad
+        case .hands: owner = .hands
+        case .none: owner = .none
+        }
+        guard PortalRouteLoss.pauses(owner: owner, lostSpatial: spatial, lostSelectedGamepad: selectedGamepad,
+                                     engineRunning: Self.engineRunning, gameUIVisible: Self.gameUIVisible) else { return }
+        NSLog("[P2XR] Playing %@ disconnected; pausing the game", spatial ? "Sense controller" : "gamepad")
+        pauseUntil = ProcessInfo.processInfo.systemUptime + Self.pausePress
+        awaitingRelease = true
+    }
+
+    nonisolated static func isSense(_ device: GCController) -> Bool {
+        if #available(visionOS 26.0, *) { return device.productCategory == GCProductCategorySpatialController }
+        return false
+    }
+
+    #if P2_GAME
+    private static var engineRunning: Bool { p2_vision_game_state() == 1 }
+    private static var gameUIVisible: Bool { p2_vision_game_ui_visible() != 0 }
+    #else
+    private static let engineRunning = false, gameUIVisible = false
+    #endif
+
+    // Nothing pressed, triggers up, sticks near center.
+    private static func neutral(_ input: P2XRInput) -> Bool {
+        input.buttons == 0 && max(input.blue_trigger, input.orange_trigger) < 0.05 &&
+            simd_length(SIMD2(input.move_x, input.move_y)) < 0.2 && simd_length(SIMD2(input.turn_x, input.look_y)) < 0.2
+    }
+
     private func publish() {
         guard p2_xr_session_active(session) != 0 else { return }
         guard !suspended else { hands?.cancel(); p2_xr_release_input(session); return }
         let now = ProcessInfo.processInfo.systemUptime
+        if let until = pauseUntil {
+            if now < until {
+                var press = P2XRInput()
+                press.connected = 1
+                press.buttons = UInt32(P2_XR_PAUSE.rawValue)
+                p2_xr_publish_input(session, &press)
+                return
+            }
+            pauseUntil = nil
+        }
+        guard !Self.launcherVisible else { hands?.cancel(); p2_xr_release_input(session); return }
         let sense = spatial?.inputSnapshot()
         let gamepad = controller?.extendedGamepad
         let pad = gamepad.map(Self.gamepadInput)
+        let senseOwns = sense != nil && PortalControllerRoute.senseOwnsInput(
+            senseDevices: spatial?.connectedDevices ?? 0, gamepadConnected: pad != nil)
         // Only an immersive session publishes tracked headset frames.
         var frame = P2XRFrame()
         let tracked = p2_xr_read(session, &frame, nil) != 0
@@ -109,7 +178,7 @@ final class PortalController {
             } else { handsUnavailable = true }
         }
         let active = gamepad.map(Self.gamepadActive) ?? false
-        let decision = arbiter.update(time: now, spatialConnected: sense != nil, gamepadConnected: pad != nil,
+        let decision = arbiter.update(time: now, spatialConnected: senseOwns, gamepadConnected: pad != nil,
                                       gamepadActive: active, handsAvailable: hands?.isRunning == true)
         if decision.changed { NSLog("[P2XR] Input owner: %@", decision.owner.rawValue) }
         if decision.owner != .hands { hands?.cancel() }
@@ -120,6 +189,13 @@ final class PortalController {
         case .hands:
             input = hands?.snapshot(head: tracked ? frame.tracking_from_head : nil, time: now) ?? P2XRInput()
         case .none: input = P2XRInput()
+        }
+        if awaitingRelease {
+            // Nothing connected is not a release: a controller that
+            // reconnects with a press held must let go first.
+            guard input.connected != 0, Self.neutral(input) else { p2_xr_release_input(session); return }
+            awaitingRelease = false
+            NSLog("[P2XR] Controls released; input reaches the game again")
         }
         windowGesture(input)
         if input.connected == 0 { p2_xr_release_input(session) }
@@ -168,6 +244,25 @@ final class PortalController {
 
     static func releaseAll() {
         if let active { p2_xr_release_input(active.session) }
+    }
+
+    // The Library covering a running game: release input now; when it hides,
+    // wait for a full release before the game sees anything.
+    static func setLauncherVisible(_ visible: Bool) {
+        guard launcherVisible != visible else { return }
+        launcherVisible = visible
+        if let active {
+            if !visible { active.awaitingRelease = true }
+            active.publish()
+        }
+    }
+
+    // A pause press for the game (the Library opening over gameplay). Only
+    // during gameplay: in a menu the same press would resume.
+    static func pauseGameplay() {
+        guard let active, engineRunning, !gameUIVisible else { return }
+        active.pauseUntil = ProcessInfo.processInfo.systemUptime + pausePress
+        active.publish()
     }
 
     static func suspend(session: UInt64, _ value: Bool) {

@@ -4,6 +4,10 @@ import GameController
 import MetalKit
 import SwiftUI
 
+// The one window: the Library (PortalLauncherView.swift) until Play, then the
+// running game with the expand arrows. The engine has one lifetime per
+// process; the Library can cover the running game (Resume returns to it) and
+// the window can be dismissed for immersive play, and neither stops it.
 struct PortalGameView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openImmersiveSpace) private var openSpace
@@ -11,135 +15,228 @@ struct PortalGameView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @ObservedObject private var flow = PortalGameFlow.shared
+    @ObservedObject private var readiness = PortalControllerReadiness.shared
     @State private var windowToken = UUID()
-    @State private var status = "Checking your Portal 2 files…"
-    @State private var started = false
     @State private var aspect = 16.0 / 9.0
     @StateObject private var importer = PortalContentImporter()
+    @State private var engine = p2_vision_game_state()
     @State private var importing = false
-    @State private var importFailed = false
+    @State private var importTask: Task<Void, Never>?
     @State private var checking = false
-    // Set while the owned content is incomplete (or an import stopped): the
-    // setup panel replaces the game picture and the engine is never started.
+    @State private var starting = false
+    @State private var libraryOverGame = false
+    @State private var sheet: PortalLibrarySheet?
+    @State private var notice: String?
+    // The last owned-content check (complete or not); nil before one finishes.
     @State private var setup: PortalContentSetup?
+
+    private var showsGame: Bool { engine == 1 && !libraryOverGame }
+    private var abiMatches: Bool { p2_xr_abi_version() == P2_XR_ABI_VERSION }
+
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Portal 2").font(.headline)
-                Spacer()
-                if checking && setup == nil { ProgressView().controlSize(.small) }
-            }
-            PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
-                .overlay {
-                    if flow.phase == .opening {
-                        ProgressView("Opening immersive view…").padding(24).glassBackgroundEffect()
-                    } else if let setup, !started, !importing {
-                        PortalSetupPanel(setup: setup, checking: checking, importFailed: importFailed,
-                                         checkAgain: { Task { await refresh("check-again", start: true) } },
-                                         retryImport: { Task { await prepareGame() } })
-                    }
-                }
-            Text(flow.message ?? status).font(.caption).foregroundStyle(.secondary)
-            if importFailed && setup == nil && !started && !checking {
-                Button("Retry import") { Task { await prepareGame() } }
-            }
-            if importing {
-                ProgressView(value: Double(importer.completedBytes), total: Double(max(importer.totalBytes,1)))
-                Text(importer.status).font(.caption).foregroundStyle(.secondary)
-            }
-            if started {
-                Text("Pause, or hold both stick buttons, to return to this window. L3 alone recenters.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }.padding(20)
+        Group {
+            if showsGame { game } else { library }
+        }
         .handlesGameControllerEvents(matching: .gamepad)
         // Hidden while a transition is in flight or the space presents.
-        .ornament(visibility: started && !importing && flow.phase == .window ? .visible : .hidden,
+        .ornament(visibility: showsGame && flow.phase == .window ? .visible : .hidden,
                   attachmentAnchor: .scene(.topTrailing)) {
             PortalExpandControl(enabled: flow.canExpand) { Task { await flow.expand() } }
+        }
+        .ornament(visibility: showsGame && flow.phase == .window ? .visible : .hidden,
+                  attachmentAnchor: .scene(.topLeading)) {
+            PortalLibraryControl { showLibrary() }
         }
         .onAppear {
             flow.adopt(openSpace: openSpace, dismissSpace: dismissSpace, openWindow: openWindow, dismissWindow: dismissWindow)
             flow.windowAppeared(windowToken)
         }
+        .task { await prepare() }
         .task {
-            if p2_xr_abi_version() != P2_XR_ABI_VERSION { status = "The native input library needs rebuilding." }
-            await prepareGame()
+            // The engine flips state on its own thread (start, return).
+            while !Task.isCancelled {
+                let current = p2_vision_game_state()
+                if current != engine { engine = current }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        .onChange(of: engine == 1 && libraryOverGame, initial: true) { _, covered in
+            PortalController.setLauncherVisible(covered)
         }
         .onChange(of: scenePhase) { _, value in
-            PortalController.suspend(session: flow.controlsSession,value != .active)
+            PortalController.suspend(session: flow.controlsSession, value != .active)
             // Back from Settings (freed space) or elsewhere: look again.
-            if value == .active, setup != nil, !started, !importing, !importFailed {
-                Task { await refresh("foreground", start: true) }
+            if value == .active, engine != 1, setup?.complete != true, !importing, !checking {
+                Task { await refresh("foreground", start: false) }
             }
         }
-        .onDisappear { flow.windowDisappeared(windowToken) }
+        .onDisappear {
+            PortalController.setLauncherVisible(false)
+            flow.windowDisappeared(windowToken)
+        }
     }
-    // Cold icon launch, --engine-test and after an import: the engine starts by
-    // itself once the content check passes; otherwise the setup panel shows.
-    @MainActor private func prepareGame() async {
-        guard !importing, !checking else { return }
-        importFailed = false
-        var trigger = "launch"
-        if p2_vision_game_state() == 0 || p2_vision_game_state() == -1 {
-            let arguments = ProcessInfo.processInfo.arguments
-            if let index = arguments.firstIndex(of: "--import-content"), index+1 < arguments.count,
-               let url = URL(string: arguments[index+1]) {
-                importing = true
-                setup = nil
-                status = "Importing your Portal 2 files from your Mac."
-                do {
-                    let documents = FileManager.default.urls(for: .documentDirectory,in: .userDomainMask)[0]
-                    try await importer.run(manifestURL: url,documents: documents)
-                    importing = false
-                    status = "Game files imported."
-                    trigger = "import"
-                } catch {
-                    let error = error as NSError
-                    let reason = error.userInfo[NSURLErrorNetworkUnavailableReasonKey] as? NSNumber
-                    fputs("[vision-import] Failed: domain=\(error.domain) code=\(error.code) network_reason=\(reason?.intValue ?? -1)\n",stderr)
-                    importing = false
-                    importFailed = true
-                    status = "Import stopped. Check Local Network access and your Mac connection, then retry."
-                    await refresh("import-failed", start: false)
-                    return
+
+    private var game: some View {
+        VStack(spacing: 10) {
+            PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    if flow.phase == .opening {
+                        ProgressView("Opening immersive view\u{2026}").padding(24).glassBackgroundEffect()
+                    } else if !flow.engineFrames {
+                        ProgressView("Starting Portal 2\u{2026}").padding(24).glassBackgroundEffect()
+                    }
                 }
+            HStack(spacing: 12) {
+                Label(readiness.route.summary, systemImage: readiness.route.ready ? "gamecontroller.fill" : "gamecontroller")
+                    .foregroundStyle(readiness.route.ready ? PortalStyle.success : PortalStyle.warning)
+                Spacer(minLength: 12)
+                Text(flow.message ?? gameHint).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
             }
+            .font(.caption)
+            .lineLimit(2)
         }
-        switch p2_vision_game_state() {
-        case 1: started = true; setup = nil; status = "Portal 2 is running."
-        case 2: status = PortalContentSetup.stopped
-        default: await refresh(trigger, start: true)
+        .padding(16)
+    }
+
+    private var gameHint: String {
+        if ProcessInfo.processInfo.environment["P2_VISION_STEREO_AUDIT"] == "1" {
+            return "Stereo renderer audit: fixed eye separation, no tracked headset pose."
+        }
+        return "Expand to play around you. Pause, or hold both stick buttons, to come back."
+    }
+
+    private var library: some View {
+        PortalLibraryView(state: cardState, setup: setup, message: notice, importer: importer,
+                          importing: importing, checking: checking, play: { Task { await play() } },
+                          resume: resume, checkAgain: { Task { await refresh("check-again", start: false) } },
+                          startImport: startImport, cancelImport: { importTask?.cancel() },
+                          dismissMessage: { notice = nil }, sheet: $sheet)
+    }
+
+    private var cardState: PortalCardState {
+        PortalCardState.resolve(engine: engine, content: setup.map(\.complete), nothingImported: setup?.nothingImported ?? false,
+                                importing: importing,
+                                importFraction: importer.totalBytes > 0 ? Double(importer.completedBytes) / Double(importer.totalBytes) : nil,
+                                starting: starting)
+    }
+
+    // MARK: Actions
+
+    private func showLibrary() {
+        // Pause first (only during gameplay), then hold input while the
+        // Library covers the game.
+        PortalController.pauseGameplay()
+        libraryOverGame = true
+    }
+
+    private func resume() {
+        libraryOverGame = false
+        sheet = nil
+    }
+
+    @MainActor private func play() async {
+        guard engine != 1, !starting, !importing else { return }
+        guard abiMatches else { notice = "This build needs its native libraries rebuilt."; return }
+        starting = true
+        await refresh("play", start: true)
+        starting = false
+    }
+
+    // Icon launches show the Library. Development launches keep starting by
+    // themselves: --engine-test/--immersive-test, and --import-content URL
+    // (import, then start).
+    @MainActor private func prepare() async {
+        guard engine != 1, !importing, !checking else { return }
+        if !abiMatches { notice = "This build needs its native libraries rebuilt." }
+        let arguments = ProcessInfo.processInfo.arguments
+        let autoStart = arguments.contains("--engine-test") || arguments.contains("--immersive-test")
+        if engine != 2, let index = arguments.firstIndex(of: "--import-content"), index + 1 < arguments.count,
+           let url = URL(string: arguments[index + 1]) {
+            let task = Task { @MainActor in
+                if await runImport(url) { await refresh("import", start: abiMatches) }
+            }
+            importTask = task   // Cancel Import reaches it too
+            await task.value
+            importTask = nil
+            return
+        }
+        if engine == 2 { return }
+        await refresh(autoStart ? "launch" : "library", start: autoStart && abiMatches)
+    }
+
+    private func startImport(_ url: URL) {
+        guard !importing, engine != 1 else { return }
+        importTask = Task { @MainActor in
+            if await runImport(url) { await refresh("import", start: false) }
+            importTask = nil
         }
     }
+
+    // Never while the engine runs: it reads these files.
+    @MainActor private func runImport(_ url: URL) async -> Bool {
+        guard !importing, p2_vision_game_state() != 1 else { return false }
+        importing = true
+        notice = nil
+        var failure: Error?
+        do {
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            try await importer.run(manifestURL: url, documents: documents)
+        } catch { failure = error }
+        importing = false
+        guard let failure else { return true }
+        if failure is CancellationError {
+            await refresh("import-cancelled", start: false)
+        } else {
+            let error = failure as NSError
+            let reason = error.userInfo[NSURLErrorNetworkUnavailableReasonKey] as? NSNumber
+            fputs("[vision-import] Failed: domain=\(error.domain) code=\(error.code) network_reason=\(reason?.intValue ?? -1)\n", stderr)
+            notice = "The import stopped. Check Local Network access and your Mac\u{2019}s connection, then try again."
+            await refresh("import-failed", start: false)
+        }
+        return false
+    }
+
     // Runs the content check off the main actor; with `start`, starts the
     // engine only if it passes (p2_vision_game_start enforces the same gate).
     @MainActor private func refresh(_ trigger: String, start: Bool) async {
         guard !checking, !importing else { return }
-        let abi = p2_xr_abi_version() == P2_XR_ABI_VERSION
         checking = true
-        if abi && !importFailed { status = "Checking your Portal 2 files…" }
-        let result = await PortalContentSetup.check(trigger, start: start && abi)
+        let result = await PortalContentSetup.check(trigger, start: start)
         checking = false
+        engine = p2_vision_game_state()
         if let result {
-            setup = result.complete && !importFailed ? nil : result
-            if !abi { status = "The native input library needs rebuilding." }
-            else if !importFailed { status = result.headline }
+            setup = result
+            if start && !result.complete { sheet = .importFiles }
             return
         }
-        setup = nil
-        if p2_vision_game_state() == 2 { status = PortalContentSetup.stopped; return }
-        started = true
-        if ProcessInfo.processInfo.environment["P2_VISION_STEREO_AUDIT"] == "1" {
-            status = "Stereo renderer audit: fixed eye separation, no tracked headset pose."
-        } else {
-            status = "Starting Portal 2. Use the expand arrows to play around you in stereo."
+        // Started (or already running/returned): the content passed the gate.
+        setup?.complete = true
+        if engine == 2 { notice = PortalContentSetup.stopped }
+    }
+}
+
+// Returns from the running game to the Library (the game pauses).
+private struct PortalLibraryControl: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 44, height: 44)
         }
+        .buttonStyle(.plain)
+        .glassBackgroundEffect(in: Circle())
+        .contentShape(.hoverEffect, Circle())
+        .hoverEffect()
+        .accessibilityLabel("Library")
+        .accessibilityHint("Pauses the game and shows the Library.")
+        .help("Library")
     }
 }
 
 // What the owned-content check found (runtime/content_check.h), worded for
-// the setup panel. Names are owned file names only.
+// the Library card and the Game Files sheet. Names are owned file names only.
 struct PortalContentSetup: Equatable, Sendable {
     var complete = false
     var requiredMissing = 0, badDirectories = 0, archives = 0, missingArchives = 0, shortArchives = 0
@@ -152,7 +249,6 @@ struct PortalContentSetup: Equatable, Sendable {
     var names: [String] = []
 
     static let stopped = "Portal 2 has stopped. Close and reopen the app to play again."
-    static let delivery = "On your Mac, in the portal2-avp folder, start tools/serve_owned_content.py, then relaunch this app with --import-content and the manifest address from its receipt (AVP-INSTALL.md, \u{201C}Headset content import\u{201D}). Files already here are verified and kept; only missing ones are copied. Keep the headset awake and allow Local Network access."
 
     init(_ report: P2ContentReport) {
         complete = report.complete != 0
@@ -191,7 +287,7 @@ struct PortalContentSetup: Equatable, Sendable {
     }
 
     private static func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
-    private var nothingImported: Bool { requiredMissing >= 3 }
+    var nothingImported: Bool { requiredMissing >= 3 }
     // With a readable list, a missing archive is also one of its missing files: count it once.
     private var problems: Int {
         let archive = requiredMissing + badDirectories + missingArchives + shortArchives
@@ -261,45 +357,6 @@ struct PortalContentSetup: Equatable, Sendable {
             }
         }
         return text
-    }
-}
-
-private struct PortalSetupPanel: View {
-    let setup: PortalContentSetup
-    let checking: Bool
-    let importFailed: Bool
-    let checkAgain: () -> Void
-    let retryImport: () -> Void
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(setup.title).font(.title2.weight(.semibold))
-                Text(setup.detail)
-                if !setup.names.isEmpty {
-                    Text("Missing or damaged: " + setup.names.joined(separator: ", ") + (setup.moreNames ? ", \u{2026}" : ""))
-                        .font(.caption.monospaced()).foregroundStyle(.secondary)
-                }
-                if !setup.space.isEmpty {
-                    Text(setup.space).foregroundStyle(setup.spaceShort ? Color.orange : Color.secondary)
-                }
-                if !setup.complete {
-                    Divider()
-                    Text("Copy the game files from your Mac").font(.headline)
-                    Text(PortalContentSetup.delivery).font(.callout).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 12) {
-                    Button(setup.complete ? "Start Portal 2" : "Check again", action: checkAgain)
-                        .buttonStyle(.borderedProminent).disabled(checking)
-                    if importFailed { Button("Retry import", action: retryImport).disabled(checking) }
-                    if checking { ProgressView() }
-                }
-                .padding(.top, 4)
-            }
-            .frame(maxWidth: 620, alignment: .leading)
-            .padding(28)
-        }
-        .glassBackgroundEffect()
-        .padding(20)
     }
 }
 

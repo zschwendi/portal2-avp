@@ -166,7 +166,8 @@ accepted on hardware yet** (see the gates below).
   controller (CalcViewModelView hook; `P2_XR_VIEWMODEL=0`,
   `P2_XR_VIEWMODEL_OFFSET`). A cyan laser shows the aim. Opt out with
   `P2_NATIVE_TRACE_FIRE_PORTAL=0`. Grab and use follow head aim.
-- **Controls.** Owner per tick: connected Sense pair, else a gamepad in use
+- **Controls.** Owner per tick: connected Sense pair (a lone Sense
+  controller only without a gamepad), else a gamepad in use
   (+0.75 s), else immersive hands. DualSense mapping is unchanged (PS/Home
   and Create are never read). Hands (immersive only, own ARKit session):
   left index pinch + arm movement = move stick (2 cm dead zone, 12 cm full),
@@ -177,6 +178,32 @@ accepted on hardware yet** (see the gates below).
   run time; SourceAutoRecord (MIT) indices/layouts are credited. Portal2VR,
   its forks and SourceVR are unlicensed and were used only as behaviour
   references — no code from them is included.
+
+### Library launcher (Nov 17)
+
+The window opens on a Dark Eco-style Library (Port Forge pattern, own
+palette from the icon): one card whose capsule is Import (files missing or
+incomplete, with the Game Files sheet: paste the `serve_owned_content.py`
+address, progress, Cancel), Play (complete files; the same gate in
+`p2_vision_game_start`) or Resume. Icon launches no longer start the engine
+by themselves; `--engine-test`, `--immersive-test` and `--import-content`
+still do. While the game runs, the window's top-leading ornament shows the
+Library over it: a pause press is sent during gameplay only, input is held
+released, and Resume returns once every control is let go. The app-name menu
+holds Settings (controller list with battery, both mappings, immersive
+help, local saves, Workshop/co-op/cloud shown as not available). A
+controller acts on the card reveal-first (✕ shows focus, ✕ again acts, ○
+clears). Rules shared with PortalController live in the pure
+`PortalLauncherModel.swift` (`tests/test_visionos_launcher.py`):
+
+- A lone Sense controller owns input only when no gamepad is connected; a
+  connected pair still always wins. A departing Sense device is no longer
+  counted from the stale controller list, so a gone pair cannot keep a
+  DualSense locked out.
+- Losing the controller that plays (selected gamepad, or a Sense device of
+  the owning pair) during gameplay presses pause once — in immersive this
+  is the existing pause → window return. Spare devices leaving change
+  nothing. Afterwards input waits for a full release.
 
 Hardware gates, in order: (1) sustained windowed play with DualSense and
 both Sense controllers; (2) stereo parallax, head 6DoF, portal travel and

@@ -7,6 +7,8 @@ protocol PortalSpatialSource: AnyObject, Sendable {
     @MainActor func start()
     @MainActor func stop()
     @MainActor func inputSnapshot() -> P2XRInput?
+    // Sense controllers connected now (resolved or not).
+    @MainActor var connectedDevices: Int { get }
     func writePoses(at timestamp: Double, into frame: inout P2XRFrame)
 }
 
@@ -24,6 +26,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
     @MainActor private var generation = 0
     @MainActor private var bindings: [(Accessory, GCController)] = []
     @MainActor private var present = false
+    @MainActor private(set) var connectedDevices = 0
     @MainActor private var stopped = false
     private enum ConnectionError: Error { case disconnected }
 
@@ -45,22 +48,28 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
     @MainActor func start() {
         guard observers.isEmpty, !stopped else { return }
         for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
-            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refresh() }
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                // A departing controller can still be listed when this
+                // arrives; counting it would keep a gone pair owning input.
+                let gone = name == .GCControllerDidDisconnect ? (note.object as? GCController).map { ObjectIdentifier($0) } : nil
+                Task { @MainActor [weak self] in self?.refresh(excluding: gone) }
             })
         }
         refresh()
     }
 
-    @MainActor private func refresh() {
+    @MainActor private func refresh(excluding gone: ObjectIdentifier? = nil) {
         generation += 1
         let revision = generation
         let previous = refreshTask
         previous?.cancel()
         bindings = []
         let hadProvider = lock.withLock { let present = provider != nil; provider = nil; return present }
-        let controllers = GCController.controllers().filter { $0.productCategory == GCProductCategorySpatialController }
+        let controllers = GCController.controllers().filter {
+            $0.productCategory == GCProductCategorySpatialController && ObjectIdentifier($0) != gone
+        }
         present = !controllers.isEmpty
+        connectedDevices = controllers.count
         refreshTask = Task { [weak self] in
             // Serialize provider changes, including a cancelled run that is
             // still returning from ARKit. A late connection cannot win.
@@ -176,6 +185,7 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
         observers = []
         bindings = []
         present = false
+        connectedDevices = 0
         lock.withLock { provider = nil }
     }
 }
