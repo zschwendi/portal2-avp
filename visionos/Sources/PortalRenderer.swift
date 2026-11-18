@@ -332,9 +332,13 @@ final class PortalRenderer: @unchecked Sendable {
     }
     #endif
 
+    private func secondsSinceEpoch(_ time: LayerRenderer.Clock.Instant) -> Double {
+        let components = LayerRenderer.Clock.Instant.epoch.duration(to: time).components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
+    }
+
     private func encode(drawable: LayerRenderer.Drawable, command: MTLCommandBuffer) {
-        let duration = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime)
-        let timestamp = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        let timestamp = secondsSinceEpoch(drawable.frameTiming.presentationTime)
         #if targetEnvironment(simulator)
         // Only this explicitly named renderer check permits a synthetic pose.
         // It is never marked tracked or delivered to game input.
@@ -357,7 +361,8 @@ final class PortalRenderer: @unchecked Sendable {
         xr.tracked = tracked ? 1 : 0
         xr.eye_count = UInt32(drawable.views.count)
         xr.tracking_from_head = head
-        spatial?.writePoses(at: timestamp, into: &xr)
+        // The compositor predicts tracked accessories on their own per-frame clock.
+        spatial?.writePoses(at: secondsSinceEpoch(drawable.frameTiming.trackableAnchorTime), into: &xr)
         if drawable.views.count == 2 {
             xr.eyes.0.head_from_eye = drawable.views[0].transform
             xr.eyes.1.head_from_eye = drawable.views[1].transform
