@@ -44,6 +44,7 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     P2ContentReport _report;
     UILabel *_title, *_detail, *_names, *_space, *_heading, *_help, *_status;
     UIButton *_button;
+    UIStackView *_frameRateChoices;
     id _observer;
 }
 
@@ -127,11 +128,24 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 
 - (void)checkAgainNow { [self check:"check-again"]; }
 
-- (void)changeFrameRate:(UISegmentedControl *)sender {
-    if (self.frameRateOverridden || sender.selectedSegmentIndex == UISegmentedControlNoSegment) return;
-    NSString *value = sender.selectedSegmentIndex == 0 ? @"120" : @"60";
+- (void)showFrameRate:(int)limit {
+    for (UIButton *choice in _frameRateChoices.arrangedSubviews) {
+        choice.selected = choice.tag == limit;
+        UIButtonConfiguration *style = choice.configuration;
+        style.baseBackgroundColor = choice.selected ? UIColor.systemBlueColor : UIColor.secondarySystemFillColor;
+        style.baseForegroundColor = UIColor.labelColor;
+        choice.configuration = style;
+        choice.accessibilityTraits = UIAccessibilityTraitButton | (choice.selected ? UIAccessibilityTraitSelected : 0);
+    }
+}
+
+- (void)changeFrameRate:(UIButton *)sender {
+    if (self.frameRateOverridden) return;
+    int limit = sender.tag == 60 ? 60 : 120;
+    NSString *value = limit == 60 ? @"60" : @"120";
     [NSUserDefaults.standardUserDefaults setObject:value forKey:@(P2_IOS_FRAME_RATE_KEY)];
     setenv(P2_IOS_FRAME_RATE_ENV, value.UTF8String, 1);
+    [self showFrameRate:limit];
 }
 
 - (UILabel *)label:(UIFont *)font color:(UIColor *)color {
@@ -189,17 +203,23 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
         UILabel *frameRate = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody]
                                   color:UIColor.labelColor];
         frameRate.text = TEXT(@"Limite d’images par seconde", @"Frame rate limit");
-        UISegmentedControl *choice = [[UISegmentedControl alloc] initWithItems:@[
-            TEXT(@"120 i/s", @"120 FPS"), TEXT(@"60 i/s", @"60 FPS")
-        ]];
-        choice.accessibilityLabel = frameRate.text;
-        choice.selectedSegmentIndex = rt_ios_requested_frame_rate(1, getenv(P2_IOS_FRAME_RATE_ENV)) == 60 ? 1 : 0;
-        choice.enabled = !self.frameRateOverridden;
-        [choice addTarget:self action:@selector(changeFrameRate:) forControlEvents:UIControlEventValueChanged];
-        UIStackView *frameRateRow = [[UIStackView alloc] initWithArrangedSubviews:@[frameRate, choice]];
+        _frameRateChoices = [[UIStackView alloc] init];
+        _frameRateChoices.spacing = 8;
+        for (NSNumber *limit in @[@120, @60]) {
+            UIButtonConfiguration *style = UIButtonConfiguration.filledButtonConfiguration;
+            style.title = [NSString stringWithFormat:TEXT(@"%@ i/s", @"%@ FPS"), limit];
+            UIButton *choice = [UIButton buttonWithConfiguration:style primaryAction:nil];
+            choice.tag = limit.integerValue;
+            choice.enabled = !self.frameRateOverridden;
+            [choice.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+            [choice addTarget:self action:@selector(changeFrameRate:) forControlEvents:UIControlEventTouchUpInside];
+            [_frameRateChoices addArrangedSubview:choice];
+        }
+        [self showFrameRate:rt_ios_requested_frame_rate(1, getenv(P2_IOS_FRAME_RATE_ENV))];
+        UIStackView *frameRateRow = [[UIStackView alloc] initWithArrangedSubviews:@[frameRate, _frameRateChoices]];
         frameRateRow.alignment = UIStackViewAlignmentCenter;
         frameRateRow.spacing = 16;
-        [choice setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [_frameRateChoices setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
         [stack addArrangedSubview:settings];
         [stack addArrangedSubview:frameRateRow];
         [stack setCustomSpacing:32 afterView:row];
