@@ -283,20 +283,28 @@ int p2_xr_cross_portal(matrix_float4x4 portal, matrix_float4x4 *transform) {
 
 int p2_xr_cover_projection(matrix_float4x4 p, float aspect, matrix_float4x4 *cover, float *fov) {
     if (!cover || !finite_matrix(p) || !isfinite(aspect) || aspect < 0.1f || aspect > 10) return 0;
-    // Only a plain perspective (clip w = -z, no skew/rotation) has tangent
-    // extents: x = (2X + (R+L)Z)/(R-L) etc. Anything else stays mono.
+    // Compositor projections can contain small off-axis terms. Accept those
+    // while rejecting actual skew and non-perspective matrices.
     float off = fabsf(p.columns[0].y) + fabsf(p.columns[0].z) + fabsf(p.columns[0].w) +
         fabsf(p.columns[1].x) + fabsf(p.columns[1].z) + fabsf(p.columns[1].w) +
         fabsf(p.columns[3].x) + fabsf(p.columns[3].y) + fabsf(p.columns[3].w);
-    float sx = p.columns[0].x, sy = p.columns[1].y;
-    if (!(sx > 0 && sy > 0) || off > 1e-5f || fabsf(p.columns[2].w + 1) > 1e-5f) return 0;
-    float right = (1 + fabsf(p.columns[2].x)) / sx, up = (1 + fabsf(p.columns[2].y)) / sy;
+    if (!(p.columns[0].x > 0 && p.columns[1].y > 0) || off > 1e-4f ||
+        fabsf(p.columns[2].w + 1) > 1e-4f || !(p.columns[3].z > 0)) return 0;
+    // Unproject the same far-plane corners used by the crop shader. This
+    // gives a cover that contains the full view even with those small terms.
+    matrix_float4x4 inverse = simd_inverse(p);
+    float right = 0, up = 0;
+    for (unsigned corner = 0; corner < 4; ++corner) {
+        vector_float4 ray = simd_mul(inverse, (vector_float4){corner & 1 ? 1 : -1, corner & 2 ? 1 : -1, 0, 1});
+        if (!isfinite(ray.x) || !isfinite(ray.y) || !isfinite(ray.z) || !(ray.z < 0)) return 0;
+        right = fmaxf(right, fabsf(ray.x / ray.z));
+        up = fmaxf(up, fabsf(ray.y / ray.z));
+    }
     float half_x = fmaxf(right, up * aspect), half_y = half_x / aspect;
     float degrees = 2 * atanf(half_x) * 180 / (float)M_PI;
     if (!(degrees > 1 && degrees < 170)) return 0;
-    p.columns[0].x = 1 / half_x; p.columns[1].y = 1 / half_y;
-    p.columns[2].x = 0; p.columns[2].y = 0;  // depth (z) and w rows unchanged
-    *cover = p;
+    *cover = (matrix_float4x4){{{1 / half_x, 0, 0, 0}, {0, 1 / half_y, 0, 0},
+                                {0, 0, p.columns[2].z, -1}, {0, 0, p.columns[3].z, 0}}};
     if (fov) *fov = degrees;
     return 1;
 }

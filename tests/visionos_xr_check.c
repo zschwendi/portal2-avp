@@ -347,6 +347,20 @@ static void symmetric_cover(void) {
     assert(!p2_xr_cover_projection(current, 0, &cover, NULL));
     assert(!p2_xr_cover_projection(frustum(-200, 200, -1, 1, 0.1f, 100), 1, &cover, NULL)); // ~180 degrees
     assert(!memcmp(&cover, &matrix_identity_float4x4, sizeof(cover)));
+
+    // Captured on Vision Pro during a tracked frame which previously fell back to mono.
+    current = (matrix_float4x4){{{0.727158f, 3.52717e-7f, 0, 3.07175e-6f},
+                                  {-6.7505e-6f, 0.90641f, 0, -1.60814e-5f},
+                                  {-0.268959f, -0.0876383f, 0.000994308f, -1},
+                                  {0, 0, 0.0994309f, 0}}};
+    assert(p2_xr_cover_projection(current, 1736.0f / 1192, &cover, NULL));
+    assert(cover.columns[0].y == 0 && cover.columns[0].w == 0);
+    assert(cover.columns[1].x == 0 && cover.columns[1].w == 0);
+    matrix_float4x4 crop = simd_mul(cover, simd_inverse(current));
+    for (unsigned corner = 0; corner < 4; ++corner) {
+        vector_float4 clip = simd_mul(crop, (vector_float4){corner & 1 ? 1 : -1, corner & 2 ? 1 : -1, 0, 1});
+        assert(clip.w > 0 && fabsf(clip.x / clip.w) <= 1 + 1e-5f && fabsf(clip.y / clip.w) <= 1 + 1e-5f);
+    }
 }
 // Apple head pose: yaw about +Y (+ is left), pitch about +X (+ is up).
 static P2XRFrame head(float yaw, float pitch, vector_float3 position) {
