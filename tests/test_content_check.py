@@ -242,7 +242,8 @@ class LauncherCompileTests(unittest.TestCase):
                         '-I' + str(ROOT / 'runtime'), '-I' + str(ROOT / 'runtime/ios'),
                         '-I' + str(ROOT / 'runtime/visionos'), '-I' + str(prefix), '-I' + str(prefix / 'SDL2'),
                         str(ROOT / 'runtime/visionos/game_vision.m')], check=True)
-        sources = sorted(str(p) for p in (ROOT / 'visionos/Sources').glob('*.swift'))
+        sources = sorted(str(p) for directory in ('visionos/Sources', 'apple/Saves')
+                         for p in (ROOT / directory).glob('*.swift'))
         result = subprocess.run(['xcrun', '--sdk', 'xros', 'swiftc', '-typecheck', '-target', 'arm64-apple-xros2.0',
                                  '-swift-version', '6', '-D', 'P2_GAME',
                                  '-import-objc-header', str(ROOT / 'visionos/Portal2XR-Bridging-Header.h'),
