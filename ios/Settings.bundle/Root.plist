@@ -62,7 +62,7 @@
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
-			<true/>
+			<false/>
 			<key>Key</key>
 			<string>P2ShowFPS</string>
 			<key>Title</key>
@@ -72,7 +72,7 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
-			<string>Le mode trackpad fait tourner la caméra en glissant le doigt sur la moitié droite de l'écran ; le bouton en bas à gauche bascule aussi ce réglage en jeu.</string>
+			<string>Sur iPad, faites glisser le doigt sur la moitié droite de l’écran pour tourner la caméra. Sur iPhone, le bouton en bas à gauche bascule le mode trackpad en jeu.</string>
 			<key>Title</key>
 			<string>Commandes tactiles</string>
 			<key>Type</key>
@@ -106,7 +106,7 @@
 			<key>Key</key>
 			<string>P2TouchTrackpad</string>
 			<key>Title</key>
-			<string>Caméra en trackpad</string>
+			<string>Caméra en trackpad (iPhone)</string>
 			<key>Type</key>
 			<string>PSToggleSwitchSpecifier</string>
 		</dict>

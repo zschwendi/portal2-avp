@@ -53,6 +53,7 @@ static void read_launch_file(const char *bundle) {
 int main(int argc, char **argv) {
     // Réglages de l'app Réglages d'iOS : avant tout le reste (P2Log pose P2_LOG_FILE).
     int frame_rate_overridden = getenv(P2_IOS_FRAME_RATE_ENV) != NULL;
+    int show_fps_overridden = getenv(P2_IOS_SHOW_FPS_ENV) != NULL;
     char settings[1024];
     int applied = rt_ios_settings_load(settings, sizeof(settings));
     // Journal fiable : la console de simctl perd la fin quand le processus meurt.
@@ -122,7 +123,8 @@ int main(int argc, char **argv) {
         int show_launcher = argc <= 1 && rt_ios_is_ipad() && !(skip && !strcmp(skip, "1")) &&
                             !getenv("P2_IOS_NO_PRESENT") && !getenv("P2_TOUCH_TEST_CLICK") &&
                             !getenv("P2_TOUCH_TEST_MOVE") && !has_argument("+map");
-        rt_ios_content_gate(roots[0], roots[1], roots[2], documents, show_launcher, frame_rate_overridden);
+        rt_ios_content_gate(roots[0], roots[1], roots[2], documents, show_launcher, frame_rate_overridden,
+                            show_fps_overridden);
     }
     // Options du runtime absentes : dossiers de Documents (sur appareil, les
     // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles

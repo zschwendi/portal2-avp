@@ -10,4 +10,5 @@
 // documents : dossier de Documents/portal2-setup-status.json, écrit à chaque
 // vérification.
 void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
-                         const char *documents, int show_launcher, int frame_rate_overridden);
+                         const char *documents, int show_launcher, int frame_rate_overridden,
+                         int show_fps_overridden);

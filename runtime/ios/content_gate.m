@@ -36,6 +36,7 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 - (BOOL)check:(const char *)trigger;
 @property(nonatomic) BOOL showLauncher;
 @property(nonatomic) BOOL frameRateOverridden;
+@property(nonatomic) BOOL showFPSOverridden;
 @end
 
 @implementation P2ContentGateController {
@@ -148,6 +149,12 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     [self showFrameRate:limit];
 }
 
+- (void)changeShowFPS:(UISwitch *)sender {
+    if (self.showFPSOverridden) return;
+    [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:@(P2_IOS_SHOW_FPS_KEY)];
+    setenv(P2_IOS_SHOW_FPS_ENV, sender.isOn ? "1" : "0", 1);
+}
+
 - (UILabel *)label:(UIFont *)font color:(UIColor *)color {
     UILabel *label = [[UILabel alloc] init];
     label.font = font;
@@ -220,8 +227,23 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
         frameRateRow.alignment = UIStackViewAlignmentCenter;
         frameRateRow.spacing = 16;
         [_frameRateChoices setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+
+        UILabel *fpsCounter = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody]
+                                     color:UIColor.labelColor];
+        fpsCounter.text = TEXT(@"Compteur d’images", @"FPS counter");
+        UISwitch *fpsSwitch = [[UISwitch alloc] init];
+        fpsSwitch.on = rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV));
+        fpsSwitch.enabled = !self.showFPSOverridden;
+        fpsSwitch.accessibilityLabel = fpsCounter.text;
+        [fpsSwitch addTarget:self action:@selector(changeShowFPS:) forControlEvents:UIControlEventValueChanged];
+        [fpsSwitch setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+        UIStackView *fpsRow = [[UIStackView alloc] initWithArrangedSubviews:@[fpsCounter, fpsSwitch]];
+        fpsRow.alignment = UIStackViewAlignmentCenter;
+        fpsRow.spacing = 16;
+
         [stack addArrangedSubview:settings];
         [stack addArrangedSubview:frameRateRow];
+        [stack addArrangedSubview:fpsRow];
         [stack setCustomSpacing:32 afterView:row];
     }
 
@@ -367,12 +389,14 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
 @end
 
 void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
-                         const char *documents, int show_launcher, int frame_rate_overridden) {
+                         const char *documents, int show_launcher, int frame_rate_overridden,
+                         int show_fps_overridden) {
     @autoreleasepool {
         const char *roots[4] = {game, linux_root, prep, documents};
         P2ContentGateController *gate = [[P2ContentGateController alloc] initWithRoots:roots];
         gate.showLauncher = show_launcher;
         gate.frameRateOverridden = frame_rate_overridden;
+        gate.showFPSOverridden = show_fps_overridden;
         if ([gate check:"launch"]) return;
         // SDL_main tourne déjà dans la boucle d'UIKit (cycle de vie classique,
         // sans UIScene) : une fenêtre à nous, et la boucle d'exécution tourne

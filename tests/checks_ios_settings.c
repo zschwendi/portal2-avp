@@ -65,6 +65,24 @@ RT_CHECK(ios_frame_rate_defaults_and_saved_choice) {
     clear_env();
 }
 
+RT_CHECK(ios_fps_counter_defaults_and_saved_choice) {
+    clear_env();
+    assert(!rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV)));
+    assert(!rt_ios_show_fps("0"));
+    assert(!rt_ios_show_fps("false"));
+    assert(!rt_ios_show_fps("invalid"));
+    assert(rt_ios_show_fps("true"));
+
+    Pref prefs[] = {{P2_IOS_SHOW_FPS_KEY, "1"}, {NULL, NULL}};
+    assert(rt_ios_settings_apply(fake_get, prefs, NULL, 0) == 1);
+    assert(rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV)));
+    assert(!getenv(P2_IOS_FRAME_RATE_ENV));
+    setenv(P2_IOS_SHOW_FPS_ENV, "0", 1);
+    assert(rt_ios_settings_apply(fake_get, prefs, NULL, 0) == 0);
+    assert(!rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV)));
+    clear_env();
+}
+
 // Chaque réglage de la page iOS est lu par le code, et inversement
 // (P2TouchTrackpad est lu directement par touch_controls.m).
 RT_CHECK(ios_settings_match_settings_bundle) {

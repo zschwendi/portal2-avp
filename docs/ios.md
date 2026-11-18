@@ -62,11 +62,12 @@ To change it, set `"language"` in `config/local.json` and rebuild.
 
 ## Settings
 
-On iPad, open Portal 2 to choose a 120 or 60 FPS limit under **Settings**, then
-tap **Play**. The choice is saved and applies to that launch. The default is
-120 FPS, capped at the display's maximum refresh rate. Native resolution and
-high texture detail with 16× anisotropic filtering are requested by default on
-physical iPads. Game launch arguments can override these settings.
+On iPad, open Portal 2 to choose a 120 or 60 FPS limit under **Settings**. The
+separate **FPS counter** switch defaults to off. Both choices are saved and
+apply when you tap **Play**. The default frame rate limit is 120 FPS, capped at
+the display's maximum refresh rate. Native resolution and high texture detail
+with 16× anisotropic filtering are requested by default on physical iPads.
+Game launch arguments can override these settings.
 
 Use `P2_IOS_SKIP_LAUNCHER=1` for an unattended launch. Explicit command-line
 launches and launch files with `+map` also go straight to the content check
@@ -84,9 +85,9 @@ The setting titles below are the ones shown in the app, which is still in French
 |---|---|---|
 | Résolution (Resolution) | `P2_IOS_RENDER_SCALE` (+ the game's `-w`/`-h`) | automatic (native on iPad, up to ×2 on iPhone, ×1 on simulator), native, ×2, ×1.5, ×1 |
 | Images par seconde (Frames per second) | `P2_IOS_MAX_FPS` | automatic (120 on iPad, 60 on iPhone), 60, 120 |
-| Compteur d'images (FPS counter) | `P2_SHOW_FPS` | shown by default; tapping the top-left corner shows or hides it (choice is remembered) |
+| Compteur d'images (FPS counter) | `P2_SHOW_FPS` | off by default; available in the iPad launcher and iOS Settings |
 | Commandes à l'écran (On-screen controls) | `P2_TOUCH_CONTROLS` | automatic (hidden when a controller is connected), always, never |
-| Caméra en trackpad (Trackpad camera) | key `P2TouchTrackpad` | also toggled by the button at the bottom left |
+| Caméra en trackpad (Trackpad camera) | key `P2TouchTrackpad` | iPhone only, with a toggle at the bottom left. iPad uses swipe-to-look |
 | Vitesse de la caméra (Camera speed) | `P2_TOUCH_LOOK` | ×0.5 to ×3 |
 | Accélération du trackpad (Trackpad acceleration) | `P2_TOUCH_ACCEL` | none (1) to strong (4), normal 2.5 |
 | Tapes au dos (Back taps) | `P2_BACKTAP` | enabled by default |
