@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Crée « Portal 2 Natif.app », lançable depuis le Finder ou le Dock.
+"""Crée « Portal 2 Natif.app », dont la Bibliothèque s’ouvre depuis le Finder ou le Dock.
 
-L'application ne recopie pas le jeu : Contents/MacOS/portal2-native est un
-lien vers build/portal2-native de ce dépôt (une recompilation est donc prise en
-compte sans refaire l'app), et le lanceur reprend les chemins de
-config/local.json. Il démarre Steam s'il ne tourne pas et écrit le journal dans ~/Library/Logs/Portal2Natif.log.
+L'application ne recopie pas le jeu. Elle démarre build/portal2-native de ce
+dépôt, y compris après une recompilation, avec les chemins de config/local.json.
+Le bouton Play démarre Steam s'il ne tourne pas et écrit le
+journal dans ~/Library/Logs/Portal2Natif.log. Le lanceur terminal reste tools/run_game.py.
 
     python3 tools/make_app.py                      # ~/Applications
     python3 tools/make_app.py --dest /Applications
@@ -12,10 +12,13 @@ config/local.json. Il démarre Steam s'il ne tourne pas et écrit le journal dan
 """
 import argparse
 import json
+import platform
 import plistlib
 import shlex
 import shutil
 import stat
+import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,12 +28,13 @@ NAME = 'Portal 2 Natif'
 DEFAULT_ARGS = ['-game', 'portal2', '-novid']
 
 LAUNCHER = '''#!/bin/bash
-# Lanceur généré par tools/make_app.py : le modifier là-bas.
+# Worker de lancement produit par tools/make_app.py.
 LOG="$HOME/Library/Logs/Portal2Natif.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-alert() {{ /usr/bin/osascript -e "display alert \\"{name}\\" message \\"$1\\" as critical" >/dev/null 2>&1; }}
-if [ ! -x {binary} ]; then alert "Exécutable introuvable : {binary_text}. Lancer tools/build_game.py --release."; exit 1; fi
-if [ ! -d {game_dir} ]; then alert "Données du jeu introuvables (disque externe débranché ?) : {game_dir_text}"; exit 1; fi
+mkdir -p "$(dirname "$LOG")" || exit 1
+exec >"$LOG" 2>&1
+fail() {{ printf '%s\\n' "$1" >&2; exit 1; }}
+if [ ! -x {binary} ]; then fail "Exécutable introuvable. Lancer tools/build_game.py --release."; fi
+if [ ! -d {game_dir} ]; then fail "Données du jeu introuvables. Le disque du jeu est peut-être débranché."; fi
 # L'API Steam a besoin du client Steam ouvert et connecté.
 if ! /usr/bin/pgrep -qx steam_osx; then
     /usr/bin/open -ga Steam
@@ -38,12 +42,12 @@ if ! /usr/bin/pgrep -qx steam_osx; then
     sleep 5
 fi
 export SteamAppId=620 SteamGameId=620
-mkdir -p "$(dirname "$LOG")" {user_dir}
+mkdir -p {user_dir} || exit 1
 # Langue : P2_LANGUAGE, "language" de config/local.json, Steam, système (tools/language.py).
 # Un -language passé au lanceur l'emporte ; en cas d'échec, le jeu reste en anglais.
 LANGUAGE_ARGS=$(/usr/bin/python3 {language_script} -- {game_args} "$@" 2>/dev/null)
-exec "$HERE/portal2-native" --images {images} --game-dir {game_dir} --linux-root {linux_root} \\
-    --user-dir {user_dir} -- {game_args} $LANGUAGE_ARGS "$@" >"$LOG" 2>&1
+exec {binary} --images {images} --game-dir {game_dir} --linux-root {linux_root} \\
+    --user-dir {user_dir} -- {game_args} $LANGUAGE_ARGS "$@"
 '''
 
 
@@ -60,24 +64,52 @@ def main():
         'linux_root': Path(config['linux_root']), 'user_dir': Path(config.get('user_dir') or ROOT / '../work/portal2-userdata').expanduser().resolve(),
     }
 
+    args.dest.mkdir(parents=True, exist_ok=True)
     app = args.dest / f'{NAME}.app'
-    if app.exists(): shutil.rmtree(app)
+    with tempfile.TemporaryDirectory(prefix='.portal2-launcher-', dir=args.dest) as temporary:
+        staging = Path(temporary)
+        staged_app = staging / app.name
+        build_bundle(staged_app, paths, game_args or DEFAULT_ARGS)
+        # Conserver le précédent paquet tant que la nouvelle version ne compile pas.
+        previous = staging / 'previous.app'
+        if app.exists() or app.is_symlink():
+            app.rename(previous)
+        try:
+            staged_app.rename(app)
+        except OSError:
+            if previous.exists() or previous.is_symlink():
+                previous.rename(app)
+            raise
+    print(app)
+
+
+def build_bundle(app, paths, game_args):
     macos = app / 'Contents/MacOS'
     resources = app / 'Contents/Resources'
     macos.mkdir(parents=True)
     resources.mkdir()
 
-    launcher = macos / 'launcher'
-    launcher.write_text(LAUNCHER.format(
-        name=NAME, language_script=shlex.quote(str(ROOT / 'tools/language.py')), game_args=shlex.join(game_args or DEFAULT_ARGS),
-        binary_text=str(binary), game_dir_text=str(paths['game_dir']).replace('"', ''),
+    worker = resources / 'launch-game'
+    worker.write_text(LAUNCHER.format(
+        language_script=shlex.quote(str(ROOT / 'tools/language.py')), game_args=shlex.join(game_args),
         **{key: shlex.quote(str(value)) for key, value in paths.items()}))
-    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    # Lien et non copie (354 Mo) ; lancé par ce chemin, le processus appartient
-    # à l'app (icône du Dock, nom dans le menu).
-    (macos / 'portal2-native').symlink_to(binary)
+    worker.chmod(worker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    manifest = {
+        'engine': str(paths['binary']), 'images': str(paths['images']), 'game': str(paths['game_dir']),
+        'depot': str(paths['linux_root']), 'saves': str(paths['user_dir']),
+        'log': str(Path.home() / 'Library/Logs/Portal2Natif.log'),
+    }
+    (resources / 'launch.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
-    icon = paths['game_dir'] / 'portal2/resource/game.icns'
+    subprocess.run([
+        'xcrun', '--sdk', 'macosx', 'swiftc', '-O', '-parse-as-library',
+        '-target', f'{platform.machine()}-apple-macos13.0',
+        str(ROOT / 'macos/Portal2Launcher.swift'), '-o', str(macos / 'launcher'),
+    ], check=True)
+
+    icon = ROOT / 'art/icon/Portal2.icns'
+    if not icon.is_file():
+        icon = paths['game_dir'] / 'portal2/resource/game.icns'
     if icon.exists(): shutil.copy(icon, resources / 'portal2.icns')
     plist = {
         'CFBundleName': NAME, 'CFBundleDisplayName': NAME, 'CFBundleIdentifier': 'fr.kanapitsas.portal2-native',
@@ -86,7 +118,7 @@ def main():
         'NSHighResolutionCapable': True, 'LSApplicationCategoryType': 'public.app-category.games',
     }
     with (app / 'Contents/Info.plist').open('wb') as f: plistlib.dump(plist, f)
-    print(app)
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(app)], check=True)
 
 
 if __name__ == '__main__':

@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
             }
         }
         const char *skip = getenv("P2_IOS_SKIP_LAUNCHER");
-        int show_launcher = argc <= 1 && rt_ios_is_ipad() && !(skip && !strcmp(skip, "1")) &&
+        int show_launcher = argc <= 1 && !(skip && !strcmp(skip, "1")) &&
                             !getenv("P2_IOS_NO_PRESENT") && !getenv("P2_TOUCH_TEST_CLICK") &&
                             !getenv("P2_TOUCH_TEST_MOVE") && !has_argument("+map");
         rt_ios_content_gate(roots[0], roots[1], roots[2], documents, show_launcher, frame_rate_overridden,

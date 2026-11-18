@@ -27,9 +27,17 @@ struct PortalLibraryView: View {
             GeometryReader { proxy in
                 ScrollView {
                     VStack(spacing: 16) {
+                        Text("Library")
+                            .font(.largeTitle.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                            .frame(maxWidth: 620, alignment: .leading)
                         PortalGameCard(state: state, detail: cardDetail, focused: readiness.focused,
-                                       checkAgain: canCheckAgain ? checkAgain : nil, activate: primary)
+                                       activate: primary)
                             .frame(maxWidth: 620)
+                        if case .needsFiles = state, canCheckAgain {
+                            Button("Check Again", action: checkAgain)
+                                .buttonStyle(PortalCapsuleButtonStyle(prominent: false))
+                        }
                         PortalControllerStrip(route: readiness.route, lowBattery: readiness.lowBattery?.name)
                         if let message {
                             PortalBanner(message: message, dismiss: dismissMessage).frame(maxWidth: 560)
@@ -141,7 +149,6 @@ struct PortalGameCard: View {
     let state: PortalCardState
     let detail: String
     let focused: Bool
-    let checkAgain: (() -> Void)?
     let activate: () -> Void
 
     var body: some View {
@@ -181,7 +188,8 @@ struct PortalGameCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(14)
-            .background(PortalStyle.surface.opacity(0.9), in: RoundedRectangle(cornerRadius: PortalStyle.cornerRadius, style: .continuous))
+            .background(PortalStyle.surface, in: RoundedRectangle(cornerRadius: PortalStyle.cornerRadius, style: .continuous))
+            .shadow(color: PortalStyle.shadow, radius: 20, x: 0, y: 8)
             .overlay {
                 RoundedRectangle(cornerRadius: PortalStyle.cornerRadius, style: .continuous)
                     .strokeBorder(focused ? PortalStyle.accentGlow : PortalStyle.border, lineWidth: focused ? 3 : 1)
@@ -194,13 +202,6 @@ struct PortalGameCard: View {
         .accessibilityLabel("Portal 2, \(state.statusLabel), \(action.title)")
         .accessibilityHint(detail)
         .accessibilityAddTraits(.isButton)
-        .overlay(alignment: .bottomTrailing) {
-            if let checkAgain {
-                Button("Check Again", action: checkAgain)
-                    .buttonStyle(PortalCapsuleButtonStyle(prominent: false))
-                    .padding(14)
-            }
-        }
     }
 
     @ViewBuilder private var status: some View {
@@ -247,7 +248,8 @@ struct PortalControllerStrip: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(PortalStyle.surface.opacity(0.8), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(PortalStyle.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(PortalStyle.border, lineWidth: 1) }
         .frame(maxWidth: 560)
         .accessibilityElement(children: .combine)
     }
@@ -275,7 +277,8 @@ struct PortalBanner: View {
                 .accessibilityLabel("Dismiss")
         }
         .padding(12)
-        .background(PortalStyle.raisedSurface.opacity(0.95), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(PortalStyle.raisedSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(PortalStyle.border, lineWidth: 1) }
     }
 }
 
@@ -407,12 +410,14 @@ struct PortalSettingsSheet: View {
                         }
                     }
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section("DualSense or gamepad") {
                     row("Move / look", "Left stick / right stick")
                     row("Blue / orange portal", "R2 / L2")
                     row("Jump \u{00B7} crouch \u{00B7} use", "\u{2715} \u{00B7} \u{25CB} \u{00B7} \u{25A1}")
                     row("Pause", "Options")
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section("PS VR2 Sense") {
                     row("Move / look", "Left stick / right stick")
                     row("Blue / orange portal", "Right / left trigger")
@@ -420,24 +425,29 @@ struct PortalSettingsSheet: View {
                     row("Crouch", "\u{25B3} or \u{25CB}")
                     row("Aim (immersive)", "Point the right controller")
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section("Immersive view") {
                     Text("Use the expand arrows on the game window to play around you. Pause, or hold both stick buttons, to come back to the window. Press the left stick to recenter.")
                     Text("Without a controller, hand gestures work in immersive view.")
                         .foregroundStyle(PortalStyle.textSecondary)
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section("Saves and game files") {
                     row("Game files", setup.map { $0.complete ? "Complete" : "Incomplete" } ?? "Not checked yet")
                     Text("Saves and settings stay on this Vision Pro with the app. Deleting the app deletes them.")
                         .foregroundStyle(PortalStyle.textSecondary)
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section("Online") {
                     row("Steam Workshop", "Not available")
                     row("Online co-op", "Not available")
                     row("Cloud saves", "Not available")
                 }
+                .listRowBackground(PortalStyle.surface)
                 Section {
                     row("Version", Self.version)
                 }
+                .listRowBackground(PortalStyle.surface)
             }
             .scrollContentBackground(.hidden)
             .background { PortalBackdrop().ignoresSafeArea() }

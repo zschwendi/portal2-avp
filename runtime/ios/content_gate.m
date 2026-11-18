@@ -30,6 +30,72 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     return [NSNumberFormatter localizedStringFromNumber:@(count) numberStyle:NSNumberFormatterDecimalStyle];
 }
 
+enum {
+    LibraryCanvas = 0xF4F7FC, LibraryPaper = 0xFFFFFF, LibraryLine = 0xDCE6F0,
+    LibraryInk = 0x17283D, LibrarySecondary = 0x4C6178, LibraryBlue = 0x005CB8,
+    LibraryOrange = 0xB54708, LibraryOrangeArt = 0xEF7622,
+};
+
+static UIColor *libraryColor(unsigned rgb) {
+    return [UIColor colorWithRed:((rgb >> 16) & 255) / 255.0
+                           green:((rgb >> 8) & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:1];
+}
+
+// Original artwork for the Library cover, sized to the actual card bounds.
+@interface P2PortalCoverView : UIView
+@end
+
+static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGFloat tilt,
+                       unsigned rim, unsigned inside) {
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context, center.x, center.y);
+    CGContextRotateCTM(context, tilt);
+    CGRect oval = CGRectMake(-height * .26, -height * .5, height * .52, height);
+    UIColor *color = libraryColor(rim);
+    CGContextSetShadowWithColor(context, CGSizeZero, height * .16, [color colorWithAlphaComponent:.32].CGColor);
+    CGContextSetFillColorWithColor(context, libraryColor(inside).CGColor);
+    CGContextFillEllipseInRect(context, oval);
+    CGContextSetShadowWithColor(context, CGSizeZero, 0, NULL);
+    CGContextSetStrokeColorWithColor(context, color.CGColor);
+    CGContextSetLineWidth(context, height * .075);
+    CGContextStrokeEllipseInRect(context, oval);
+    CGContextSetStrokeColorWithColor(context, [UIColor.whiteColor colorWithAlphaComponent:.8].CGColor);
+    CGContextSetLineWidth(context, MAX(1, height * .014));
+    CGContextStrokeEllipseInRect(context, CGRectInset(oval, height * .0375, height * .0375));
+    CGContextRestoreGState(context);
+}
+
+@implementation P2PortalCoverView
+- (void)drawRect:(CGRect)rect {
+    (void)rect;
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    CGFloat w = CGRectGetWidth(self.bounds), h = CGRectGetHeight(self.bounds);
+    NSArray *colors = @[(id)libraryColor(0xE4F1FF).CGColor, (id)libraryColor(LibraryPaper).CGColor,
+                        (id)libraryColor(0xFFF0E3).CGColor];
+    CGGradientRef gradient = CGGradientCreateWithColors(NULL, (__bridge CFArrayRef)colors, NULL);
+    CGContextDrawLinearGradient(context, gradient, CGPointZero, CGPointMake(w, h), 0);
+    CGGradientRelease(gradient);
+
+    CGContextSetStrokeColorWithColor(context, libraryColor(LibraryLine).CGColor);
+    CGContextSetLineWidth(context, 1);
+    for (int i = 0; i <= 8; i++) {
+        CGFloat offset = w * (i - 4) / 8;
+        CGContextMoveToPoint(context, w * .5 + offset * .4, h * .66);
+        CGContextAddLineToPoint(context, w * .5 + offset * 1.65, h);
+    }
+    CGFloat floorLines[] = {.66, .76, .91};
+    for (unsigned i = 0; i < sizeof(floorLines) / sizeof(*floorLines); i++) {
+        CGContextMoveToPoint(context, 0, h * floorLines[i]);
+        CGContextAddLineToPoint(context, w, h * floorLines[i]);
+    }
+    CGContextStrokePath(context);
+
+    CGFloat ovalHeight = MIN(h * .7, w * .37);
+    drawPortal(context, CGPointMake(w * .35, h * .51), ovalHeight, -.15, 0x1987EB, 0xD5EAFF);
+    drawPortal(context, CGPointMake(w * .65, h * .46), ovalHeight, .15, LibraryOrangeArt, 0xFFE3CA);
+}
+@end
+
 @interface P2ContentGateController : UIViewController
 @property(nonatomic, readonly) BOOL passed;
 - (instancetype)initWithRoots:(const char *const *)roots;
@@ -133,8 +199,8 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     for (UIButton *choice in _frameRateChoices.arrangedSubviews) {
         choice.selected = choice.tag == limit;
         UIButtonConfiguration *style = choice.configuration;
-        style.baseBackgroundColor = choice.selected ? UIColor.systemBlueColor : UIColor.secondarySystemFillColor;
-        style.baseForegroundColor = UIColor.labelColor;
+        style.baseBackgroundColor = libraryColor(choice.selected ? LibraryBlue : LibraryCanvas);
+        style.baseForegroundColor = libraryColor(choice.selected ? LibraryPaper : LibraryInk);
         choice.configuration = style;
         choice.accessibilityTraits = UIAccessibilityTraitButton | (choice.selected ? UIAccessibilityTraitSelected : 0);
     }
@@ -160,13 +226,78 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     label.font = font;
     label.textColor = color;
     label.numberOfLines = 0;
+    label.adjustsFontForContentSizeCategory = YES;
     return label;
+}
+
+- (UIStackView *)surfaceWithViews:(NSArray<UIView *> *)views {
+    UIStackView *surface = [[UIStackView alloc] initWithArrangedSubviews:views];
+    surface.axis = UILayoutConstraintAxisVertical;
+    surface.spacing = 10;
+    surface.layoutMargins = UIEdgeInsetsMake(14, 14, 14, 14);
+    surface.layoutMarginsRelativeArrangement = YES;
+    surface.backgroundColor = libraryColor(LibraryPaper);
+    surface.layer.cornerRadius = 18;
+    surface.layer.borderWidth = 1;
+    surface.layer.borderColor = libraryColor(LibraryLine).CGColor;
+    return surface;
+}
+
+- (UIView *)launcherSettings {
+    UIColor *ink = libraryColor(LibraryInk);
+    CGFloat settingsGap = 12;
+    BOOL accessibleText = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    UILabel *settings = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:ink];
+    settings.text = TEXT(@"Réglages", @"Settings");
+    settings.accessibilityTraits |= UIAccessibilityTraitHeader;
+    UILabel *frameRate = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody] color:ink];
+    frameRate.text = TEXT(@"Limite d’images par seconde", @"Frame rate limit");
+    _frameRateChoices = [[UIStackView alloc] init];
+    _frameRateChoices.spacing = 8;
+    for (NSNumber *limit in @[@120, @60]) {
+        UIButtonConfiguration *style = UIButtonConfiguration.filledButtonConfiguration;
+        style.title = [NSString stringWithFormat:TEXT(@"%@ i/s", @"%@ FPS"), limit];
+        style.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+        UIButton *choice = [UIButton buttonWithConfiguration:style primaryAction:nil];
+        choice.tag = limit.integerValue;
+        choice.enabled = !self.frameRateOverridden;
+        [choice.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        [choice addTarget:self action:@selector(changeFrameRate:) forControlEvents:UIControlEventTouchUpInside];
+        [_frameRateChoices addArrangedSubview:choice];
+    }
+    [self showFrameRate:rt_ios_requested_frame_rate(rt_ios_is_ipad(), getenv(P2_IOS_FRAME_RATE_ENV))];
+    UIStackView *frameRateRow = [[UIStackView alloc] initWithArrangedSubviews:@[frameRate, _frameRateChoices]];
+    frameRateRow.axis = accessibleText ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    frameRateRow.alignment = accessibleText ? UIStackViewAlignmentLeading : UIStackViewAlignmentCenter;
+    frameRateRow.spacing = settingsGap;
+    [_frameRateChoices setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+
+    UILabel *fpsCounter = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody] color:ink];
+    fpsCounter.text = TEXT(@"Compteur d’images", @"FPS counter");
+    fpsCounter.isAccessibilityElement = NO;
+    UISwitch *fpsSwitch = [[UISwitch alloc] init];
+    fpsSwitch.on = rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV));
+    fpsSwitch.enabled = !self.showFPSOverridden;
+    fpsSwitch.onTintColor = libraryColor(LibraryBlue);
+    fpsSwitch.accessibilityLabel = fpsCounter.text;
+    [fpsSwitch addTarget:self action:@selector(changeShowFPS:) forControlEvents:UIControlEventValueChanged];
+    [fpsSwitch setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *fpsRow = [[UIStackView alloc] initWithArrangedSubviews:@[fpsCounter, fpsSwitch]];
+    fpsRow.alignment = UIStackViewAlignmentCenter;
+    fpsRow.spacing = settingsGap;
+    [fpsRow.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+
+    UIView *divider = [[UIView alloc] init];
+    divider.backgroundColor = libraryColor(LibraryLine);
+    [divider.heightAnchor constraintEqualToConstant:1].active = YES;
+    return [self surfaceWithViews:@[settings, frameRateRow, divider, fpsRow]];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    self.view.backgroundColor = libraryColor(LibraryCanvas);
+    self.view.tintColor = libraryColor(LibraryBlue);
     UIScrollView *scroll = [[UIScrollView alloc] init];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     scroll.alwaysBounceVertical = YES;
@@ -178,74 +309,59 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [scroll addSubview:stack];
 
-    _title = [self label:[UIFont systemFontOfSize:26 weight:UIFontWeightBold] color:UIColor.labelColor];
-    _detail = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody] color:UIColor.labelColor];
-    _names = [self label:[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular] color:UIColor.secondaryLabelColor];
-    _space = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:UIColor.secondaryLabelColor];
-    _heading = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:UIColor.labelColor];
+    UIColor *ink = libraryColor(LibraryInk), *secondary = libraryColor(LibrarySecondary);
+    UILabel *brand = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline] color:secondary];
+    brand.text = @"Portal 2";
+    UILabel *library = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle] color:ink];
+    library.text = TEXT(@"Bibliothèque", @"Library");
+    library.accessibilityTraits |= UIAccessibilityTraitHeader;
+
+    P2PortalCoverView *cover = [[P2PortalCoverView alloc] init];
+    cover.contentMode = UIViewContentModeRedraw;
+    cover.isAccessibilityElement = NO;
+    cover.layer.cornerRadius = 12;
+    cover.clipsToBounds = YES;
+    CGFloat maxCoverHeight = rt_ios_is_ipad() ? 164 : 118;
+    NSLayoutConstraint *coverAspect = [cover.heightAnchor constraintEqualToAnchor:cover.widthAnchor multiplier:.30];
+    coverAspect.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [cover.heightAnchor constraintGreaterThanOrEqualToConstant:96],
+        [cover.heightAnchor constraintLessThanOrEqualToConstant:maxCoverHeight], coverAspect,
+    ]];
+
+    _title = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:ink];
+    _detail = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody] color:ink];
+    _names = [self label:[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular] color:secondary];
+    _space = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:secondary];
+    _heading = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:ink];
     _heading.text = TEXT(@"Copier les fichiers du jeu depuis le Mac", @"Copy the game files from your Mac");
-    _help = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:UIColor.secondaryLabelColor];
-    _status = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote] color:UIColor.secondaryLabelColor];
+    _help = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleCallout] color:secondary];
+    _status = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote] color:secondary];
 
     UIButtonConfiguration *configuration = UIButtonConfiguration.filledButtonConfiguration;
     configuration.title = TEXT(@"Vérifier à nouveau", @"Check again");
     configuration.buttonSize = UIButtonConfigurationSizeLarge;
+    configuration.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+    configuration.baseBackgroundColor = libraryColor(LibraryBlue);
+    configuration.baseForegroundColor = libraryColor(LibraryPaper);
+    configuration.imagePadding = 8;
     __weak P2ContentGateController *weak = self;
     _button = [UIButton buttonWithConfiguration:configuration primaryAction:
         [UIAction actionWithHandler:^(__kindof UIAction *action) { (void)action; [weak checkAgain]; }]];
     [_button setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
     [_button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [_button.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[_button, _status]];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
     row.spacing = 16;
 
-    for (UIView *view in @[_title, _detail, _names, _space, _heading, _help, row]) [stack addArrangedSubview:view];
-    [stack setCustomSpacing:24 afterView:_space];
-    [stack setCustomSpacing:24 afterView:_help];
-    if (self.showLauncher) {
-        UILabel *settings = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]
-                                 color:UIColor.labelColor];
-        settings.text = TEXT(@"Réglages", @"Settings");
-        UILabel *frameRate = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody]
-                                  color:UIColor.labelColor];
-        frameRate.text = TEXT(@"Limite d’images par seconde", @"Frame rate limit");
-        _frameRateChoices = [[UIStackView alloc] init];
-        _frameRateChoices.spacing = 8;
-        for (NSNumber *limit in @[@120, @60]) {
-            UIButtonConfiguration *style = UIButtonConfiguration.filledButtonConfiguration;
-            style.title = [NSString stringWithFormat:TEXT(@"%@ i/s", @"%@ FPS"), limit];
-            UIButton *choice = [UIButton buttonWithConfiguration:style primaryAction:nil];
-            choice.tag = limit.integerValue;
-            choice.enabled = !self.frameRateOverridden;
-            [choice.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
-            [choice addTarget:self action:@selector(changeFrameRate:) forControlEvents:UIControlEventTouchUpInside];
-            [_frameRateChoices addArrangedSubview:choice];
-        }
-        [self showFrameRate:rt_ios_requested_frame_rate(1, getenv(P2_IOS_FRAME_RATE_ENV))];
-        UIStackView *frameRateRow = [[UIStackView alloc] initWithArrangedSubviews:@[frameRate, _frameRateChoices]];
-        frameRateRow.alignment = UIStackViewAlignmentCenter;
-        frameRateRow.spacing = 16;
-        [_frameRateChoices setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
-
-        UILabel *fpsCounter = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleBody]
-                                     color:UIColor.labelColor];
-        fpsCounter.text = TEXT(@"Compteur d’images", @"FPS counter");
-        UISwitch *fpsSwitch = [[UISwitch alloc] init];
-        fpsSwitch.on = rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV));
-        fpsSwitch.enabled = !self.showFPSOverridden;
-        fpsSwitch.accessibilityLabel = fpsCounter.text;
-        [fpsSwitch addTarget:self action:@selector(changeShowFPS:) forControlEvents:UIControlEventValueChanged];
-        [fpsSwitch setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
-        UIStackView *fpsRow = [[UIStackView alloc] initWithArrangedSubviews:@[fpsCounter, fpsSwitch]];
-        fpsRow.alignment = UIStackViewAlignmentCenter;
-        fpsRow.spacing = 16;
-
-        [stack addArrangedSubview:settings];
-        [stack addArrangedSubview:frameRateRow];
-        [stack addArrangedSubview:fpsRow];
-        [stack setCustomSpacing:32 afterView:row];
-    }
+    UIStackView *game = [self surfaceWithViews:@[cover, _title, row, _detail, _names, _space, _heading, _help]];
+    [stack addArrangedSubview:brand];
+    [stack setCustomSpacing:2 afterView:brand];
+    [stack addArrangedSubview:library];
+    [stack addArrangedSubview:game];
+    if (self.showLauncher) [stack addArrangedSubview:[self launcherSettings]];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     NSLayoutConstraint *width = [stack.widthAnchor constraintEqualToConstant:720];
@@ -255,11 +371,11 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
         [scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
         [scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:32],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-32],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:18],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-18],
         [scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
         [stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],
-        [stack.widthAnchor constraintLessThanOrEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-64],
+        [stack.widthAnchor constraintLessThanOrEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-36],
         width,
     ]];
     [self render];
@@ -300,18 +416,19 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     for (UILabel *label in @[_detail, _names, _space, _heading, _help, _status]) label.hidden = ready;
     UIButtonConfiguration *configuration = _button.configuration;
     configuration.title = ready ? TEXT(@"Jouer", @"Play") : TEXT(@"Vérifier à nouveau", @"Check again");
+    configuration.image = [UIImage systemImageNamed:ready ? @"play.fill" : @"arrow.clockwise"];
     _button.configuration = configuration;
     _button.enabled = YES;
     if (ready) {
-        _title.text = @"Portal 2";
+        _title.text = TEXT(@"Prêt à jouer", @"Ready to play");
+        _title.textColor = libraryColor(LibraryBlue);
         return;
     }
     NSString *model = UIDevice.currentDevice.model;  // « iPad », « iPhone »
     BOOL nothing = r->required_missing >= 3;
-    _title.text = nothing ?
-        (fr ? [NSString stringWithFormat:@"Les fichiers de Portal 2 ne sont pas encore sur cet %@", model]
-            : [NSString stringWithFormat:@"Portal 2’s game files aren’t on this %@ yet", model]) :
-        TEXT(@"Les fichiers de Portal 2 sont incomplets", @"Portal 2’s game files are incomplete");
+    _title.text = nothing ? TEXT(@"Fichiers du jeu requis", @"Game files required") :
+                            TEXT(@"Fichiers du jeu incomplets", @"Game files incomplete");
+    _title.textColor = libraryColor(LibraryOrange);
 
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     if (nothing) {
