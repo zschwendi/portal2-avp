@@ -455,8 +455,8 @@ private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
                 encoder.setRenderPipelineState(pipeline)
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.setFragmentTexture(rightTexture ?? texture,index: 1)
-                var paired: UInt32 = rightTexture == nil ? 0 : 1
-                encoder.setFragmentBytes(&paired,length: MemoryLayout<UInt32>.size,index: 0)
+                var stereoFlags = SIMD2<UInt32>(rightTexture == nil ? 0 : 1, frame.flip_left_y)
+                encoder.setFragmentBytes(&stereoFlags, length: MemoryLayout<SIMD2<UInt32>>.size, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 if !reported {
                     reported = true

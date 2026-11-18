@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define P2_XR_EYE_COUNT 2u
-#define P2_XR_ABI_VERSION 4u
+#define P2_XR_ABI_VERSION 5u
 #define P2_XR_UNITS_PER_METER 39.37007874015748f
 
 enum P2XRButtons {

@@ -535,7 +535,11 @@ final class PortalRenderer: @unchecked Sendable {
             if worldReady, let texture {
                 encoder.setRenderPipelineState(pipeline)
                 encoder.setFragmentTexture(texture,index: 0)
-                let sourceProjection = eye == 1 ? frame.render_pose.eyes.1.projection : frame.render_pose.eyes.0.projection
+                var sourceProjection = eye == 1 ? frame.render_pose.eyes.1.projection : frame.render_pose.eyes.0.projection
+                if eye == 0 && frame.flip_left_y != 0 {
+                    // Reflect in source clip space after unprojecting the drawable's eye ray.
+                    sourceProjection = simd_float4x4(diagonal: SIMD4<Float>(1, -1, 1, 1)) * sourceProjection
+                }
                 var crop = sourceProjection * simd_inverse(projection)
                 encoder.setFragmentBytes(&crop,length: MemoryLayout<simd_float4x4>.stride,index: 1)
                 // Use a finite background depth for compositor reprojection

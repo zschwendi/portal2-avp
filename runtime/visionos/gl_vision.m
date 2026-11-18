@@ -40,7 +40,7 @@ typedef struct {
     EGLSurface surface[2];
     unsigned leases;
     uint64_t sequence;
-    uint32_t kind;
+    uint32_t kind, flip_left_y;
     uint64_t xr_session;
     P2XRFrame render_pose;
 } SurfaceSlot;
@@ -52,7 +52,7 @@ typedef struct {
     int writing, published, eye;
     int width, height;
     uint64_t sequence;
-    uint32_t pending_kind;
+    uint32_t pending_kind, pending_flip_left_y;
     uint64_t pending_session;
     P2XRFrame pending_pose;
 } VisionContext;
@@ -247,7 +247,7 @@ int p2_vision_gl_resize(int width, int height) {
     memcpy(previous,context->slots,sizeof(previous));
     memcpy(context->slots,replacement,sizeof(replacement));
     context->width = width; context->height = height; context->writing = 0; context->eye = 0;
-    context->pending_kind = 0;
+    context->pending_kind = 0; context->pending_flip_left_y = 0;
     pthread_mutex_unlock(&lock);
     free_slots(context,previous);
     cadence.steady = cadence.stereo = 0;
@@ -310,6 +310,10 @@ int p2_vision_gl_capture_target(uint32_t eye) {
         bind_framebuffer(GL_DRAW_FRAMEBUFFER,(GLuint)draw);
         if (scissor) enable(GL_SCISSOR_TEST);
     }
+    // Source's last Present reverses Y when it copies to the default FBO.
+    // Only the right eye receives that pass. Tell consumers to reverse the
+    // left offscreen copy at sampling time, including for multisample resolves.
+    if (eye == 0) host->pending_flip_left_y = draw != 0 && result == GL_NO_ERROR;
     static unsigned traces;
     if (++traces <= 6 || result != GL_NO_ERROR)
         fprintf(stderr,"[gl-vision] Eye %u target draw=%d read=%d samples=%d scissor=%u prior_error=%#x prior_count=%u capture_error=%#x\n",
@@ -362,13 +366,14 @@ void p2_vision_gl_present(void) {
     context->slots[context->writing].sequence = ++context->sequence;
     SurfaceSlot *completed = &context->slots[context->writing];
     completed->kind = context->pending_kind ? context->pending_kind : P2_VISION_MONO;
+    completed->flip_left_y = completed->kind != P2_VISION_MONO ? context->pending_flip_left_y : 0;
     uint64_t now = SDL_GetTicks64();
     cadence.steady = cadence.last_ms && now - cadence.last_ms <= 100 && cadence.steady < 100000 ? cadence.steady + 1 : 0;
     cadence.stereo = completed->kind == P2_VISION_TRACKED_STEREO && cadence.stereo < 100000 ? cadence.stereo + 1 : 0;
     cadence.last_ms = now;
     completed->xr_session = context->pending_session;
     completed->render_pose = context->pending_pose;
-    context->pending_kind = 0; context->pending_session = 0;
+    context->pending_kind = 0; context->pending_session = 0; context->pending_flip_left_y = 0;
     memset(&context->pending_pose,0,sizeof(context->pending_pose));
     context->published = context->writing;
     int next = -1;
@@ -396,7 +401,7 @@ int p2_vision_gl_acquire(P2VisionGLFrame *frame) {
         *frame = (P2VisionGLFrame){.sequence=slot->sequence,.width=(uint32_t)host->width,.height=(uint32_t)host->height,
             .surface=(void *)slot->storage[0],.right_surface=(void *)slot->storage[1],
             .eye_count=slot->kind == P2_VISION_MONO ? 1 : 2,.kind=slot->kind,
-            .xr_session=slot->xr_session,.render_pose=slot->render_pose,.slot=host->published};
+            .xr_session=slot->xr_session,.render_pose=slot->render_pose,.slot=host->published,.flip_left_y=slot->flip_left_y};
     }
     pthread_mutex_unlock(&lock);
     return ready;

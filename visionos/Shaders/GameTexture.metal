@@ -6,13 +6,14 @@ vertex GameRaster p2_game_vertex(uint id [[vertex_id]]) {
     return {float4(uv * 2 - 1, 0, 1), uv};
 }
 fragment float4 p2_game_fragment(GameRaster input [[stage_in]], texture2d<float> source [[texture(0)]],
-    texture2d<float> rightEye [[texture(1)]],constant uint &paired [[buffer(0)]]) {
+    texture2d<float> rightEye [[texture(1)]], constant uint2 &stereoFlags [[buffer(0)]]) {
     constexpr sampler sample(filter::linear, address::clamp_to_edge);
     // The native GPU probe verifies IOSurface row 0 is GL's bottom row.
     // The engine's alpha channel is not window coverage.
-    if (paired) {
+    if (stereoFlags.x) {
         if (input.uv.x >= 0.5) return float4(rightEye.sample(sample, float2((input.uv.x - 0.5) * 2, input.uv.y)).rgb, 1);
-        return float4(source.sample(sample, float2(input.uv.x * 2, input.uv.y)).rgb, 1);
+        float y = stereoFlags.y ? 1 - input.uv.y : input.uv.y;
+        return float4(source.sample(sample, float2(input.uv.x * 2, y)).rgb, 1);
     }
     return float4(source.sample(sample, input.uv).rgb, 1);
 }

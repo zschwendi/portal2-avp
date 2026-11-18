@@ -19,6 +19,8 @@ typedef struct {
     // actually rendered with (crop: sourceProj * inverse(currentProj)).
     P2XRFrame render_pose;
     int32_t slot;
+    // The left image was copied before the engine's final Y-reversing Present.
+    uint32_t flip_left_y;
 } P2VisionGLFrame;
 int p2_vision_gl_acquire(P2VisionGLFrame *frame);
 void p2_vision_gl_release(int32_t slot);

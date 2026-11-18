@@ -23,7 +23,8 @@ static int check_frame(int width, int height, const unsigned char expected[4]) {
     p2_vision_gl_release(frame.slot);
     fprintf(stderr,"[P2-GL-PROBE] frame=%llu size=%ux%u BGRA=%u,%u,%u,%u\n",
         (unsigned long long)frame.sequence,frame.width,frame.height,pixel[0],pixel[1],pixel[2],pixel[3]);
-    int valid = frame.width == (unsigned)width && frame.height == (unsigned)height;
+    int valid = frame.width == (unsigned)width && frame.height == (unsigned)height &&
+        frame.kind == P2_VISION_MONO && !frame.flip_left_y;
     for (int i = 0; i < 4; ++i) valid = valid && abs((int)pixel[i] - expected[i]) <= 2;
     return valid;
 }
@@ -78,25 +79,36 @@ static int input_route(void) {
     return valid;
 }
 
-static int check_pair(const unsigned char expected[2][4]) {
+static int check_captured_pair(const unsigned char expected[2][4][4]) {
     P2VisionGLFrame frame;
     if (!p2_vision_gl_acquire(&frame)) return 0;
-    int valid = frame.eye_count == 2 && frame.kind == P2_VISION_DIAGNOSTIC_STEREO &&
+    int paired = frame.eye_count == 2 && frame.kind == P2_VISION_DIAGNOSTIC_STEREO &&
         !frame.xr_session && !frame.render_pose.tracked && frame.surface && frame.right_surface &&
         frame.surface != frame.right_surface;
-    for (unsigned eye=0; valid && eye<2; ++eye) {
+    int valid = paired && frame.flip_left_y == 1;
+    for (unsigned eye=0; paired && eye<2; ++eye) {
         IOSurfaceRef surface = (IOSurfaceRef)(eye ? frame.right_surface : frame.surface);
         IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL);
         unsigned char *base = IOSurfaceGetBaseAddress(surface);
         size_t stride = IOSurfaceGetBytesPerRow(surface);
+        int corners_match = 1;
         for (unsigned corner=0; corner<4; ++corner) {
             unsigned x = corner&1 ? frame.width-1 : 0, y = corner&2 ? frame.height-1 : 0;
             unsigned char *pixel = base + y*stride + x*4;
+            // The raw capture keeps GL row order for the left eye. Source's
+            // later Present reverses the two rows of quadrants on the right.
+            const unsigned char *color = expected[eye][eye ? corner ^ 2 : corner];
+            int pixel_matches = 1;
             for (unsigned channel=0; channel<4; ++channel)
-                valid = valid && abs((int)pixel[channel]-expected[eye][channel]) <= 2;
+                pixel_matches = pixel_matches && abs((int)pixel[channel]-color[channel]) <= 2;
+            if (!pixel_matches)
+                fprintf(stderr,"[P2-GL-PROBE] eye=%u corner=%u actual=%u,%u,%u,%u expected=%u,%u,%u,%u\n",
+                    eye,corner,pixel[0],pixel[1],pixel[2],pixel[3],color[0],color[1],color[2],color[3]);
+            corners_match = corners_match && pixel_matches;
         }
-        fprintf(stderr,"[P2-GL-PROBE] captured eye=%u BGRA=%u,%u,%u,%u corners=%s\n",
-            eye,base[0],base[1],base[2],base[3],valid ? "PASS" : "FAIL");
+        fprintf(stderr,"[P2-GL-PROBE] captured eye=%u row0 BGRA=%u,%u,%u,%u flip_left_y=%u corners=%s\n",
+            eye,base[0],base[1],base[2],base[3],frame.flip_left_y,corners_match ? "PASS" : "FAIL");
+        valid = valid && corners_match;
         IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL);
     }
     p2_vision_gl_release(frame.slot);
@@ -130,26 +142,35 @@ static int owned_target(SDL_Window *window,SDL_GLContext context) {
     image(0x0de1,0,0x1908,160,120,0,0x1908,0x1401,NULL);
     gen_fb(1,&framebuffer); bind_fb(0x8d40,framebuffer);
     attach(0x8d40,0x8ce0,0x0de1,texture,0);
+    const unsigned char expected[2][4][4] = {
+        {{0,0,255,255},{0,255,0,255},{255,0,0,255},{255,255,255,255}},
+        {{255,255,0,255},{255,0,255,255},{0,255,255,255},{0,0,0,255}},
+    };
     int valid = status(0x8d40) == 0x8cd5;
     for (unsigned eye=0; valid && eye<2; ++eye) {
         valid = !p2_vision_gl_begin_eye(eye);
         bind_fb(0x8d40,framebuffer);
-        disable(0x0c11);
-        clear_color(eye ? 0.1f : 0.9f,eye ? 0.8f : 0.2f,eye ? 0.3f : 0.1f,1);
-        clear(0x4000);
+        enable(0x0c11);
+        for (unsigned corner=0; corner<4; ++corner) {
+            const unsigned char *color = expected[eye][corner];
+            scissor(corner&1 ? 80 : 0,corner&2 ? 60 : 0,80,60);
+            clear_color(color[2]/255.0f,color[1]/255.0f,color[0]/255.0f,1);
+            clear(0x4000);
+        }
         // A tiny scissor must not crop the full eye capture. Its enabled
         // state must survive so gl4es/togl state caches remain correct.
-        enable(0x0c11); scissor(8,9,20,21);
+        scissor(8,9,20,21);
         valid = !p2_vision_gl_end_eye(eye) && is_enabled(0x0c11) && valid;
     }
     disable(0x0c11);
-    // Emulate togl's later Present through the real gl4es read/draw path.
+    // togl Present reverses destination Y when it blits to its default FBO.
     bind_fb(0x8ca8,framebuffer); bind_fb(0x8ca9,0);
-    blit(0,0,160,120,0,0,160,120,0x4000,0x2600);
+    // The first standalone blit also primes gl4es's default-FBO dimensions.
+    blit(0,0,160,120,0,120,160,0,0x4000,0x2600);
+    blit(0,0,160,120,0,120,160,0,0x4000,0x2600);
     valid = p2_vision_gl_mark_stereo(0,NULL,1) && valid;
     rt_ios_gl_swap_window(window);
-    const unsigned char expected[2][4] = {{26,51,230,255},{76,204,26,255}};
-    valid = check_pair(expected) && valid;
+    valid = check_captured_pair(expected) && valid;
     bind_fb(0x8d40,0); delete_fb(1,&framebuffer); bind_tex(0x0de1,0); delete_tex(1,&texture);
     P2VisionGLFrame before,after;
     if (p2_vision_gl_acquire(&before)) p2_vision_gl_release(before.slot); else return 0;
@@ -215,15 +236,20 @@ int main(void) {
             unsigned char *last = first + IOSurfaceGetBytesPerRow(storage) * (oriented.height - 1);
             fprintf(stderr,"[P2-GL-PROBE] GL bottom=red top=blue; IOSurface row0 BGRA=%u,%u,%u,%u last=%u,%u,%u,%u\n",
                 first[0],first[1],first[2],first[3],last[0],last[1],last[2],last[3]);
-            valid = valid && first[3] == 255 && last[3] == 255 && first[0] != last[0] && first[2] != last[2];
+            const unsigned char bottom[4] = {0,0,255,255}, top[4] = {255,0,0,255};
+            valid = valid && !oriented.flip_left_y && !memcmp(first,bottom,4) && !memcmp(last,top,4);
             IOSurfaceUnlock(storage,kIOSurfaceLockReadOnly,NULL);
             p2_vision_gl_release(oriented.slot);
         } else valid = 0;
-        // Two independent eye surfaces must survive one paired publication.
-        p2_vision_gl_begin_eye(0);
+        valid = owned_target(window,context) && valid;
+        // Direct default-FBO eyes do not need the FBO capture correction.
+        // Run after the captured pair to catch stale orientation metadata.
+        valid = !p2_vision_gl_begin_eye(0) && valid;
         clear_color(0.2f,0.4f,0.6f,1); clear(0x4000);
-        p2_vision_gl_begin_eye(1);
+        valid = !p2_vision_gl_end_eye(0) && valid;
+        valid = !p2_vision_gl_begin_eye(1) && valid;
         clear_color(0.8f,0.6f,0.4f,1); clear(0x4000);
+        valid = !p2_vision_gl_end_eye(1) && valid;
         valid = p2_vision_gl_mark_stereo(0,NULL,1) && valid;
         rt_ios_gl_swap_window(window);
         P2VisionGLFrame pair;
@@ -232,14 +258,16 @@ int main(void) {
             IOSurfaceLock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceLock(right,kIOSurfaceLockReadOnly,NULL);
             unsigned char *l = IOSurfaceGetBaseAddress(left), *r = IOSurfaceGetBaseAddress(right);
             valid = valid && pair.eye_count == 2 && pair.kind == P2_VISION_DIAGNOSTIC_STEREO &&
-                !pair.xr_session && !pair.render_pose.tracked && left != right &&
+                !pair.xr_session && !pair.render_pose.tracked && !pair.flip_left_y && left != right &&
                 abs((int)l[0]-153)<=2 && abs((int)l[2]-51)<=2 && abs((int)r[0]-102)<=2 && abs((int)r[2]-204)<=2;
             fprintf(stderr,"[P2-GL-PROBE] paired left BGRA=%u,%u,%u right=%u,%u,%u eyes=%u kind=%u tracked=%u\n",
                 l[0],l[1],l[2],r[0],r[1],r[2],pair.eye_count,pair.kind,pair.render_pose.tracked);
             IOSurfaceUnlock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceUnlock(right,kIOSurfaceLockReadOnly,NULL);
             p2_vision_gl_release(pair.slot);
         } else valid = 0;
-        valid = owned_target(window,context) && valid;
+        clear_color(0.75f,0.25f,0.5f,1); clear(0x4000);
+        rt_ios_gl_swap_window(window);
+        valid = check_frame(160,120,resized) && valid;
         p2_vision_gl_delete_context(context);
         valid = input_route() && valid;
         SDL_DestroyWindow(window); SDL_Quit();
