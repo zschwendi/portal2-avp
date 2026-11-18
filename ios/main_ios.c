@@ -123,8 +123,15 @@ int main(int argc, char **argv) {
         int show_launcher = argc <= 1 && !(skip && !strcmp(skip, "1")) &&
                             !getenv("P2_IOS_NO_PRESENT") && !getenv("P2_TOUCH_TEST_CLICK") &&
                             !getenv("P2_TOUCH_TEST_MOVE") && !has_argument("+map");
+        char resume_save[P2_IOS_SAVE_STEM_SIZE] = {0};
+        int offer_continue = show_launcher && rt_ios_is_ipad() && count + 2 < 256 &&
+                             !has_argument("+load") && !has_argument("--user-dir");
         rt_ios_content_gate(roots[0], roots[1], roots[2], documents, show_launcher, frame_rate_overridden,
-                            show_fps_overridden);
+                            show_fps_overridden, offer_continue ? resume_save : NULL);
+        if (resume_save[0]) {
+            push("+load");
+            push(resume_save);
+        }
     }
     // Options du runtime absentes : dossiers de Documents (sur appareil, les
     // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles
