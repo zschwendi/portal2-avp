@@ -304,7 +304,7 @@ RT_CHECK(touch_router_layout_fits) {
                 assert(rt_touch_button_at(&l, b->at) == (int)b->action);
                 for (int j = i + 1; j < l.count; ++j) assert(apart(b, 2, &l.buttons[j], 2));   // 4 pt d'écart
             }
-            assert(fire == want && l.count == want + 5);
+            assert(fire == want && l.count == want + (screens[s].pad ? 4 : 5));
             assert(l.stick_radius >= 44 && l.stick_radius <= 66);
         }
     // Hors de tout bouton : rien.
@@ -352,8 +352,7 @@ RT_CHECK(touch_router_phone_layout_unchanged) {
 // iPad plein écran et fenêtres étroites : actions en bas contre les coins ;
 // exactement un ovale bleu et un ovale orange, en quinconce sous le pouce
 // droit ; sauter et utiliser de part et d'autre ; Pause isolée ; zones de
-// toucher disjointes ; moitié droite libre pour la caméra ; à gauche, rien que
-// le mode de caméra dans le coin et le stick juste au-dessus.
+// toucher disjointes ; moitié droite libre pour le glissement, stick à gauche.
 RT_CHECK(touch_router_pad_corner_layout) {
     static const struct { rt_touch_rect bounds, safe; int full; } screens[] = {
         {{0, 0, 1194, 834}, {0, 24, 1194, 790}, 1},     // iPad Pro 11"
@@ -378,8 +377,7 @@ RT_CHECK(touch_router_pad_corner_layout) {
             float right = a.x + a.w, bottom = a.y + a.h, mid = l.bounds.x + l.bounds.w / 2;
             const rt_touch_button *jump = side_button(&l, RT_TOUCH_JUMP, 1), *use = side_button(&l, RT_TOUCH_USE, 1);
             const rt_touch_button *crouch = side_button(&l, RT_TOUCH_CROUCH, 1), *pause = side_button(&l, RT_TOUCH_PAUSE, 1);
-            const rt_touch_button *mode = side_button(&l, RT_TOUCH_LOOK_MODE, -1);
-            assert(l.pad && jump && use && crouch && pause && mode);
+            assert(l.pad && jump && use && crouch && pause);
             assert(jump->w == jump->h && use->w == use->h && crouch->w == crouch->h);
 
             // Exactement un bleu et un orange, tous deux à droite ; aucun à gauche.
@@ -388,7 +386,8 @@ RT_CHECK(touch_router_pad_corner_layout) {
                 blues += l.buttons[i].action == RT_TOUCH_FIRE_BLUE;
                 oranges += l.buttons[i].action == RT_TOUCH_FIRE_ORANGE;
             }
-            assert(blues == portals && oranges == portals && l.count == 5 + 2 * portals);
+            assert(blues == portals && oranges == portals && l.count == 4 + 2 * portals);
+            assert(!side_button(&l, RT_TOUCH_LOOK_MODE, -1) && !side_button(&l, RT_TOUCH_LOOK_MODE, 1));
             assert(!side_button(&l, RT_TOUCH_FIRE_BLUE, -1) && !side_button(&l, RT_TOUCH_FIRE_ORANGE, -1));
             const rt_touch_button *blue = side_button(&l, RT_TOUCH_FIRE_BLUE, 1), *orange = side_button(&l, RT_TOUCH_FIRE_ORANGE, 1);
             assert(!blue == !portals && !orange == !portals);
@@ -433,7 +432,7 @@ RT_CHECK(touch_router_pad_corner_layout) {
                 assert(b->at.x + b->w / 2 < a.x + a.w * .24f || b->at.x - b->w / 2 > a.x + a.w * .76f);
             }
             assert(pause->at.x + pause->w > right && pause->at.y - pause->h < a.y);   // coin haut droit
-            assert(mode->at.x - a.x < 2 * mode->w && bottom - mode->at.y < 2 * mode->h);   // coin bas gauche
+            assert(pause->w + 2 * hit_slack(pause) >= 44);
 
             // Caméra : au moins 70 % de la moitié droite sans bouton (85 % en plein
             // écran), et rien entre le milieu de l'écran et le groupe du coin.
@@ -445,20 +444,13 @@ RT_CHECK(touch_router_pad_corner_layout) {
                 for (float py = a.y + 2; py < bottom; py += 4)
                     for (float px = mid; px < a.x + a.w * .74f; px += 4) assert(rt_touch_button_at(&l, pt(px, py)) == -1);
 
-            // Sticks au repos : anneau entier dans sa moitié et dans la zone sûre,
-            // dégagé des boutons (un pouce posé là déplace ou vise, il ne tire pas).
-            assert(l.rest[0].x + l.stick_radius <= mid && l.rest[1].x - l.stick_radius >= mid);
-            for (int k = 0; k < 2; ++k) {
-                rt_touch_button ring = {RT_TOUCH_ACTION_COUNT, l.rest[k], 2 * l.stick_radius, 2 * l.stick_radius};
-                assert(ring.at.x - ring.w / 2 >= a.x && ring.at.x + ring.w / 2 <= right);
-                assert(ring.at.y - ring.h / 2 >= a.y && ring.at.y + ring.h / 2 <= bottom);
-                assert(rt_touch_button_at(&l, ring.at) == -1);
-                for (int i = 0; i < l.count; ++i) assert(apart(&ring, 2, &l.buttons[i], 2));
-            }
-            // Stick gauche bas, dans le coin libéré, juste au-dessus du mode de caméra.
+            rt_touch_button ring = {RT_TOUCH_ACTION_COUNT, l.rest[0], 2 * l.stick_radius, 2 * l.stick_radius};
+            assert(ring.at.x - l.stick_radius >= a.x && ring.at.x + l.stick_radius <= mid);
+            assert(ring.at.y - l.stick_radius >= a.y && ring.at.y + l.stick_radius <= bottom);
+            assert(rt_touch_button_at(&l, ring.at) == -1);
+            for (int i = 0; i < l.count; ++i) assert(apart(&ring, 2, &l.buttons[i], 2));
             assert(l.rest[0].y > a.y + a.h * .62f && l.rest[0].x - a.x < 2.2f * l.stick_radius);
-            assert(hypotf(l.rest[0].x - mode->at.x, l.rest[0].y - mode->at.y) < 2 * l.stick_radius);
-            if (screens[s].full) assert(l.rest[0].x - a.x < a.w * .16f && l.rest[0].y == l.rest[1].y);
+            if (screens[s].full) assert(l.rest[0].x - a.x < a.w * .16f);
 
             // Zone sûre déplacée (barre d'état, indicateur, fenêtre) : toute la
             // disposition suit, à l'identique.
@@ -470,8 +462,7 @@ RT_CHECK(touch_router_pad_corner_layout) {
                 assert(m.buttons[i].action == l.buttons[i].action && m.buttons[i].w == l.buttons[i].w);
                 assert(fabsf(m.buttons[i].at.x - l.buttons[i].at.x - 31) < 1e-2f && fabsf(m.buttons[i].at.y - l.buttons[i].at.y - 7) < 1e-2f);
             }
-            for (int k = 0; k < 2; ++k)
-                assert(fabsf(m.rest[k].x - l.rest[k].x - 31) < 1e-2f && fabsf(m.rest[k].y - l.rest[k].y - 7) < 1e-2f);
+            assert(fabsf(m.rest[0].x - l.rest[0].x - 31) < 1e-2f && fabsf(m.rest[0].y - l.rest[0].y - 7) < 1e-2f);
         }
 }
 
@@ -503,10 +494,20 @@ RT_CHECK(touch_router_pad_ovals_route) {
     rt_touch_moved(&r, 3, pt(twin.x, twin.y - 60), 1.01);
     assert(l.my > .5f && l.down[RT_TOUCH_FIRE_BLUE] == 2 && l.down[RT_TOUCH_FIRE_ORANGE] == 1);
     rt_touch_up(&r, 3);
-    // Sticks au repos : déplacement et caméra.
+    // Le glissement vise sur iPad même avec la préférence téléphone désactivée.
+    // Un doigt immobile ne génère aucun mouvement entre deux glissements.
+    assert(!r.trackpad);
+    rt_touch_point aim = pt(760, 420);
     rt_touch_down(&r, 4, r.layout.rest[0], 2);
-    rt_touch_down(&r, 5, r.layout.rest[1], 2);
+    rt_touch_down(&r, 5, aim, 2);
     assert(rt_touch_role_points(&r, RT_TOUCH_MOVE, NULL, NULL) && rt_touch_role_points(&r, RT_TOUCH_LOOK, NULL, NULL));
+    int looks = l.looks;
+    rt_touch_frame(&r);
+    assert(l.looks == looks);
+    rt_touch_moved(&r, 5, pt(aim.x + 10, aim.y), 2.02);
+    assert(l.looks == looks + 1 && l.look_x == 35);
+    rt_touch_frame(&r);
+    assert(l.looks == looks + 1);
     rt_touch_up(&r, 4); rt_touch_up(&r, 5);
     assert(all_released(&r, &l) && l.down[RT_TOUCH_USE] == 0 && l.modes == 0);
 }

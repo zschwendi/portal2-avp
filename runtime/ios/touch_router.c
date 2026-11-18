@@ -77,7 +77,7 @@ static void phone_layout(rt_touch_layout *l) {
 //   coin gauche                                      coin droit
 //                                                        (accroupi)
 //       stick                            (utiliser) (  orange  )
-//   (mode)                                    (  bleu  ) (saut)
+//                                            (  bleu  ) (saut)
 //
 // À droite, dans la zone de tir habituelle d'un FPS tactile, exactement deux
 // boutons de portail : des ovales horizontaux en quinconce le long de l'arc
@@ -90,8 +90,7 @@ static void phone_layout(rt_touch_layout *l) {
 // dans une bande étroite : le reste de la moitié droite est à la caméra.
 // Sans boutons de portail (P2_PORTAL_BUTTONS=0), le groupe reste en bas :
 // sauter dans le coin, utiliser à côté, s'accroupir au-dessus.
-// À gauche, rien que le déplacement : le mode de caméra dans le coin et le
-// stick au repos juste au-dessus, en diagonale.
+// La moitié gauche sert au déplacement ; à droite, on vise en glissant.
 // Tailles et marges vont de « compact » (fenêtre étroite : Split View, Slide
 // Over) à « large » (plein écran).
 static void pad_layout(rt_touch_layout *l) {
@@ -120,26 +119,16 @@ static void pad_layout(rt_touch_layout *l) {
     add_round(l, RT_TOUCH_CROUCH, right - in_corner, bottom - up_crouch, round);
     add_round(l, RT_TOUCH_USE, right - (reach - round / 2), bottom - (ovals ? up_high : up_low), round);
     float inset = small / 2 + mix(4, 8, k);
+    // La petite icône est dessinée séparément de la zone de toucher.
     add_round(l, RT_TOUCH_PAUSE, right - inset, top + inset, small);
-    add_round(l, RT_TOUCH_LOOK_MODE, left + in_corner, bottom - up_low, small);
 
-    // Stick gauche au repos : en diagonale au-dessus du mode de caméra, à un
-    // écart de lui ; dans une fenêtre étroite, ramené vers le bord (et plus
-    // haut) pour rester dans sa moitié, sans atteindre le groupe de droite.
+    // Le stick garde sa position au repos. Dans une fenêtre étroite, il reste
+    // dans sa moitié, sans atteindre le groupe de droite.
     float clear = small / 2 + gap + r;
     float in_rest = fminf(in_corner + clear * (float)M_SQRT1_2, fminf(w / 2 - r, w - reach - gap - r));
     in_rest = fmaxf(margin + r, in_rest);
     float up_rest = up_low + sqrtf(fmaxf(0, clear * clear - (in_rest - in_corner) * (in_rest - in_corner)));
-    // Stick droit au repos : juste à l'intérieur du groupe, à la hauteur du
-    // gauche ; s'il déborderait sur la moitié gauche (fenêtre étroite et
-    // haute), au-dessus du groupe.
-    float in_look = reach + gap + r, up_look = up_rest;
-    if (in_look + r > w / 2) {
-        in_look = fmaxf(margin + r, reach / 2);
-        up_look = up_crouch + round / 2 + gap + r;
-    }
     l->rest[0] = (rt_touch_point){left + in_rest, bottom - up_rest};
-    l->rest[1] = (rt_touch_point){right - in_look, bottom - up_look};
 }
 
 void rt_touch_layout_make(rt_touch_layout *l, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons, int pad) {
@@ -290,7 +279,7 @@ void rt_touch_down(rt_touch_router *r, uintptr_t id, rt_touch_point p, double t)
 void rt_touch_moved(rt_touch_router *r, uintptr_t id, rt_touch_point p, double t) {
     rt_touch_finger *f = finger_of(r, id);
     if (!f) return;
-    if (f->role == RT_TOUCH_LOOK && r->trackpad) {
+    if (f->role == RT_TOUCH_LOOK && (r->layout.pad || r->trackpad)) {
         const rt_touch_tuning *k = &r->tuning;
         double dx = p.x - f->at.x, dy = p.y - f->at.y, dt = t - f->stamp;
         // dt borné : premier mouvement (stamp nul) ou doigt resté immobile longtemps.
@@ -320,7 +309,7 @@ void rt_touch_external(rt_touch_router *r, rt_touch_action action, int down) {
 }
 
 void rt_touch_frame(rt_touch_router *r) {
-    if (r->trackpad || !rt_touch_takes_touches(r)) return;   // trackpad : mouvements au glissement
+    if (r->layout.pad || r->trackpad || !rt_touch_takes_touches(r)) return;
     for (int i = 0; i < RT_TOUCH_MAX_FINGERS; ++i) {
         const rt_touch_finger *f = &r->fingers[i];
         if (!f->id || f->role != RT_TOUCH_LOOK) continue;

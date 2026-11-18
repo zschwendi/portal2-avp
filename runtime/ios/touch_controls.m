@@ -9,12 +9,9 @@
 //   (axe gauche) que le jeu lit comme une manette Xbox : direction continue,
 //   vitesse proportionnelle à l'inclinaison. À défaut de manette virtuelle
 //   (création refusée par SDL), touches W/A/S/D en 8 directions ;
-// - stick droit : caméra, mouvements de souris relatifs à vitesse
-//   proportionnelle à l'inclinaison (courbe quadratique pour viser finement) ;
-//   chaque stick se centre là où le doigt se pose, dans sa moitié d'écran ;
-//   un bouton bascule la moitié droite en trackpad : le glissement du doigt
-//   devient directement le mouvement de souris (choix retenu entre parties,
-//   P2TouchTrackpad dans les réglages de l'app) ;
+// - caméra : sur iPad, glisser le doigt dans la moitié droite donne un
+//   mouvement de souris relatif. Sur iPhone, un bouton permet de choisir le
+//   glissement ou un stick droit (préférence P2TouchTrackpad) ;
 // - portails : tapes au dos (ci-dessous) ; sans capteur de mouvement
 //   (simulateur) ou avec P2_BACKTAP=0, une paire de boutons bleu (clic gauche)
 //   / orange (clic droit) dans chaque coin du haut ; sur iPad, exactement deux
@@ -22,8 +19,7 @@
 //   (bleu en bas vers l'intérieur, orange plus haut contre le bord) ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
 //   pause (Échap) ; sur iPad, les trois premières entourent les ovales dans le
-//   coin bas droit, et le mode de caméra tient le coin bas gauche sous le stick
-//   (disposition : touch_router.c) ;
+//   coin bas droit et la petite icône de pause est en haut à droite ;
 // - tapes au dos ou sur les côtés du téléphone (index derrière, en paysage) :
 //   à gauche portail bleu, à droite orange ; détection dans back_tap.c,
 //   nourrie ici par CoreMotion (P2_BACKTAP=0 la coupe, réglages dans
@@ -56,6 +52,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "back_tap.h"
+#include "settings.h"
 #include "touch_router.h"
 
 int rt_ios_game_ui_visible(void);   // game_state.c
@@ -89,6 +86,7 @@ static void remove_virtual_pad(SDL_Joystick *pad) {
 }
 
 static const CGFloat kKnobSize = 54;
+static const CGFloat kPadHUDOpacity = .30;
 static NSString *const kTrackpadKey = @"P2TouchTrackpad";
 
 static float env_float(const char *name, float def, float min) {
@@ -298,7 +296,7 @@ static void sink_look_mode(void *ctx, int trackpad) { [(__bridge P2TouchControls
     BOOL physicalPad;         // vraie manette connectée
     BOOL isPad;               // iPad : boutons de portail par défaut
     int fps;                  // compteur d'images affiché (0 : rien à afficher)
-    int fpsHidden;            // masqué : P2_SHOW_FPS=0 (Réglages) ou toucher du coin haut gauche
+    int fpsHidden;            // affichage sur demande dans les réglages
     unsigned long fpsFrames;  // images au dernier relevé
     CFTimeInterval fpsAt;     // instant du dernier relevé
     SDL_Joystick *pad;        // manette virtuelle du stick gauche (NULL : W/A/S/D)
@@ -319,6 +317,9 @@ static void sink_look_mode(void *ctx, int trackpad) { [(__bridge P2TouchControls
         self.multipleTouchEnabled = YES; self.backgroundColor = UIColor.clearColor; self.opaque = NO;
         self.contentMode = UIViewContentModeRedraw;
         isPad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+        // Composer toute la surcouche au même niveau, même là où le fond et
+        // l'icône d'un bouton se superposent.
+        if (isPad) self.alpha = kPadHUDOpacity;
         rt_touch_tuning tuning = touch_tuning();
         rt_touch_sink sink = {(__bridge void *)self, sink_action, sink_look, sink_move, sink_look_mode};
         rt_touch_init(&router, &tuning, &sink, [NSUserDefaults.standardUserDefaults boolForKey:kTrackpadKey]);
@@ -333,8 +334,7 @@ static void sink_look_mode(void *ctx, int trackpad) { [(__bridge P2TouchControls
             [center addObserver:self selector:@selector(resignActive) name:name object:nil];
         [center addObserver:self selector:@selector(becomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
         backtapHeld = -1;
-        const char *show = getenv("P2_SHOW_FPS");   // posée par les Réglages (runtime/ios/settings.c)
-        fpsHidden = show && !strcmp(show, "0");
+        fpsHidden = !rt_ios_show_fps(getenv(P2_IOS_SHOW_FPS_ENV));
         backtap_start();
         [self devicesChanged];
         __weak P2TouchControls *weakSelf = self;
@@ -611,12 +611,12 @@ static Sint16 axis_value(CGFloat speed, int response) {
     backtap_touch(touches);   // un toucher secoue le téléphone : pas de tape au dos autour
     for (UITouch *t in touches) {
         CGPoint p = [t locationInView:self];
-        // Coin haut gauche : affiche ou masque le compteur d'images, choix gardé
-        // dans les réglages (clé P2ShowFPS de la page Réglages).
+        // Sur iPhone, le coin haut gauche garde son raccourci. Sur iPad, le
+        // compteur se règle dans le lanceur et n'intercepte aucun toucher.
         rt_touch_rect c = router.layout.fps_corner;
-        if (CGRectContainsPoint(CGRectMake(c.x, c.y, c.w, c.h), p)) {
+        if (!isPad && CGRectContainsPoint(CGRectMake(c.x, c.y, c.w, c.h), p)) {
             fpsHidden = !fpsHidden;
-            [NSUserDefaults.standardUserDefaults setBool:!fpsHidden forKey:@"P2ShowFPS"];
+            [NSUserDefaults.standardUserDefaults setBool:!fpsHidden forKey:@(P2_IOS_SHOW_FPS_KEY)];
             fps = 0; fpsAt = 0;
             continue;
         }
@@ -654,7 +654,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
     CGContextFillEllipseInRect(c, CGRectMake(knob.x - kKnobSize / 2, knob.y - kKnobSize / 2, kKnobSize, kKnobSize));
 }
 // Compteur d'images, relevé deux fois par seconde (redessiner l'incrustation
-// coûte : seulement quand la valeur change). P2_SHOW_FPS=0 (Réglages) le masque.
+// coûte : seulement quand la valeur change). Masqué par défaut.
 - (void)updateFPS {
     if (fpsHidden) return;
     CFTimeInterval now = CACurrentMediaTime();
@@ -701,7 +701,7 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     CGContextRef c = UIGraphicsGetCurrentContext();
     CGContextSaveGState(c);
     CGContextSetShouldAntialias(c, NO);
-    CGContextSetFillColorWithColor(c, [UIColor colorWithWhite:0 alpha:.5].CGColor);
+    CGContextSetFillColorWithColor(c, [UIColor colorWithWhite:0 alpha:isPad ? 1 : .5].CGColor);
     CGContextFillRect(c, box);
     // Vert au-dessus de 55 i/s, jaune au-dessus de 30, rouge en dessous.
     UIColor *ink = fps >= 55 ? [UIColor colorWithRed:.45 green:1 blue:.35 alpha:1]
@@ -719,18 +719,21 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     if (!router.hidden) [self drawFPS];   // aussi dans les menus
     if (router.hidden || router.menu || getenv("P2_TOUCH_TEST_MOVE")) return;   // essai : écran dégagé
     CGContextRef c = UIGraphicsGetCurrentContext();
-    UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
-    UIColor *blue = [UIColor colorWithRed:.16 green:.55 blue:1 alpha:.6], *orange = [UIColor colorWithRed:1 green:.55 blue:.05 alpha:.6];
-    UIColor *shade = [UIColor colorWithWhite:0 alpha:.35];   // fond sombre : icônes lisibles sur un mur clair
+    UIColor *ink = [UIColor colorWithWhite:1 alpha:isPad ? 1 : .3];
+    UIColor *line = [UIColor colorWithWhite:1 alpha:isPad ? 1 : .45];
+    CGFloat portalAlpha = isPad ? 1 : .6;
+    UIColor *blue = [UIColor colorWithRed:.16 green:.55 blue:1 alpha:portalAlpha];
+    UIColor *orange = [UIColor colorWithRed:1 green:.55 blue:.05 alpha:portalAlpha];
+    UIColor *shade = [UIColor colorWithWhite:0 alpha:isPad ? 1 : .35];
     CGContextSetLineWidth(c, 2);
     [self drawStick:c right:NO ink:ink];
-    if (!router.trackpad) [self drawStick:c right:YES ink:ink];
+    if (!isPad && !router.trackpad) [self drawStick:c right:YES ink:ink];
     for (int i = 0; i < router.layout.count; ++i) {
         const rt_touch_button *b = &router.layout.buttons[i];
-        NSString *symbol = nil; UIColor *color = shade, *glow = UIColor.whiteColor;
+        NSString *symbol = nil; UIColor *color = shade;
         switch (b->action) {
-        case RT_TOUCH_FIRE_BLUE: color = glow = blue; break;
-        case RT_TOUCH_FIRE_ORANGE: color = glow = orange; break;
+        case RT_TOUCH_FIRE_BLUE: color = blue; break;
+        case RT_TOUCH_FIRE_ORANGE: color = orange; break;
         case RT_TOUCH_JUMP: symbol = @"arrow.up"; break;
         case RT_TOUCH_CROUCH: symbol = @"arrow.down"; break;
         case RT_TOUCH_USE: symbol = @"hand.point.up.left.fill"; break;
@@ -739,26 +742,21 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
         case RT_TOUCH_LOOK_MODE: symbol = router.trackpad ? @"hand.draw.fill" : @"r.joystick.fill"; break;
         default: break;
         }
-        // Ellipse du routeur : ovale horizontal pour un portail, cercle sinon.
-        CGRect box = CGRectMake(b->at.x - b->w / 2, b->at.y - b->h / 2, b->w, b->h);
-        // Tenu (doigt, tape au dos) : fond presque opaque. Sur iPad, où le pouce
-        // couvre le bouton, s'y ajoutent un contour blanc épais et un halo de
-        // la couleur du bouton qui dépasse du pouce ; le téléphone garde son dessin.
-        BOOL held = rt_touch_held(&router, b->action) != 0, bold = held && router.layout.pad;
-        UIColor *fill = held ? [color colorWithAlphaComponent:.9] : color;
-        CGContextSetFillColorWithColor(c, fill.CGColor); CGContextFillEllipseInRect(c, box);
-        CGContextSetLineWidth(c, bold ? 3 : 2);
-        CGContextSetStrokeColorWithColor(c, (bold ? [UIColor colorWithWhite:1 alpha:.95] : line).CGColor);
-        CGContextStrokeEllipseInRect(c, box);
-        if (bold) {
-            CGContextSetStrokeColorWithColor(c, [glow colorWithAlphaComponent:.55].CGColor);
-            CGContextStrokeEllipseInRect(c, CGRectInset(box, -5, -5));
+        BOOL held = rt_touch_held(&router, b->action) != 0;
+        BOOL quietPause = isPad && b->action == RT_TOUCH_PAUSE;
+        if (!quietPause) {
+            CGRect box = CGRectMake(b->at.x - b->w / 2, b->at.y - b->h / 2, b->w, b->h);
+            UIColor *fill = held && !isPad ? [color colorWithAlphaComponent:.9] : color;
+            CGContextSetFillColorWithColor(c, fill.CGColor); CGContextFillEllipseInRect(c, box);
+            CGContextSetLineWidth(c, held && isPad ? 3 : 2);
+            CGContextSetStrokeColorWithColor(c, line.CGColor);
+            CGContextStrokeEllipseInRect(c, box);
         }
         if (!symbol) continue;
-        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:b->h * .38
-                                                                                             weight:UIImageSymbolWeightBold];
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:b->h * (quietPause ? .30 : .38)
+                                                                                             weight:quietPause && !held ? UIImageSymbolWeightMedium : UIImageSymbolWeightBold];
         UIImage *icon = [[UIImage systemImageNamed:symbol withConfiguration:config]
-                         imageWithTintColor:[UIColor colorWithWhite:1 alpha:.85] renderingMode:UIImageRenderingModeAlwaysOriginal];
+                         imageWithTintColor:[UIColor colorWithWhite:1 alpha:isPad ? 1 : .85] renderingMode:UIImageRenderingModeAlwaysOriginal];
         CGSize z = icon.size;
         [icon drawInRect:CGRectMake(b->at.x - z.width / 2, b->at.y - z.height / 2, z.width, z.height)];
     }

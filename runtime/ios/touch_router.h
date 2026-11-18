@@ -101,8 +101,8 @@ int rt_touch_portal_buttons(const char *setting, int is_pad, int back_taps);
 //   quinconce (bleu en bas vers l'intérieur, orange plus haut contre le bord),
 //   sauter dans le coin, utiliser côté caméra, s'accroupir au-dessus ; sans
 //   boutons de portail, ces trois-là restent groupés dans le coin. À gauche,
-//   le mode de caméra dans le coin et le stick juste au-dessus. Tailles et
-//   marges vont de « compact » (fenêtre étroite) à « large » (plein écran).
+//   le stick déplace ; à droite, le glissement vise. Tailles et marges vont
+//   de « compact » (fenêtre étroite) à « large » (plein écran).
 // Pause reste seule dans le coin haut droit.
 void rt_touch_layout_make(rt_touch_layout *layout, rt_touch_rect bounds, rt_touch_rect safe, int portal_buttons, int pad);
 // Bouton sous le point (le plus proche dont la zone le contient), sinon -1.
