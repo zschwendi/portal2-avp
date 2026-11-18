@@ -151,7 +151,7 @@ final class PortalRenderer: @unchecked Sendable {
         self.serial = serial
         let device = layer.device
         #if P2_GAME
-        let vertexName = "p2_game_vertex", fragmentName = "p2_world_fragment"
+        let vertexName = "p2_world_vertex", fragmentName = "p2_world_fragment"
         #else
         let vertexName = "p2_calibration_vertex", fragmentName = "p2_calibration_fragment"
         #endif
@@ -531,9 +531,14 @@ final class PortalRenderer: @unchecked Sendable {
                 let sourceProjection = eye == 1 ? frame.render_pose.eyes.1.projection : frame.render_pose.eyes.0.projection
                 var crop = sourceProjection * simd_inverse(projection)
                 encoder.setFragmentBytes(&crop,length: MemoryLayout<simd_float4x4>.stride,index: 1)
-                // Color-only world submission uses far depth. Positional
-                // reprojection awaits actual engine depth export; fresh game
-                // frames still render from both complete six-DoF eye poses.
+                // Use a finite background depth for compositor reprojection
+                // until the engine exports depth per pixel. Zero is the clear
+                // value, and leaves regions without the laser at empty depth.
+                let range = drawable.depthRange
+                let distance = min(20, range.y + (range.x - range.y) * 0.5)
+                let projected = projection * SIMD4<Float>(0, 0, -distance, 1)
+                var backgroundDepth = projected.z / projected.w
+                encoder.setVertexBytes(&backgroundDepth, length: MemoryLayout<Float>.size, index: 1)
                 encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 3)
                 eyesDrawn += 1
                 if let laser, let head = renderHead {

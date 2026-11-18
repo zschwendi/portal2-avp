@@ -15,7 +15,6 @@ struct PortalGameView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @ObservedObject private var flow = PortalGameFlow.shared
-    @ObservedObject private var readiness = PortalControllerReadiness.shared
     @State private var windowToken = UUID()
     @State private var aspect = 16.0 / 9.0
     @StateObject private var importer = PortalContentImporter()
@@ -77,33 +76,34 @@ struct PortalGameView: View {
     }
 
     private var game: some View {
-        VStack(spacing: 10) {
+        ZStack {
+            Color.black
             PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    if flow.phase == .opening {
-                        ProgressView("Opening immersive view\u{2026}").padding(24).glassBackgroundEffect()
-                    } else if !flow.engineFrames {
-                        ProgressView("Starting Portal 2\u{2026}").padding(24).glassBackgroundEffect()
-                    }
-                }
-            HStack(spacing: 12) {
-                Label(readiness.route.summary, systemImage: readiness.route.ready ? "gamecontroller.fill" : "gamecontroller")
-                    .foregroundStyle(readiness.route.ready ? PortalStyle.success : PortalStyle.warning)
-                Spacer(minLength: 12)
-                Text(flow.message ?? gameHint).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
-            }
-            .font(.caption)
-            .lineLimit(2)
         }
-        .padding(16)
+        .ignoresSafeArea()
+        .overlay {
+            if flow.phase == .opening {
+                ProgressView("Opening immersive view\u{2026}").padding(24).glassBackgroundEffect()
+            } else if !flow.engineFrames {
+                ProgressView("Starting Portal 2\u{2026}").padding(24).glassBackgroundEffect()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let message = flow.message ?? stereoAuditMessage {
+                Text(message)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .glassBackgroundEffect()
+                    .padding(16)
+            }
+        }
     }
 
-    private var gameHint: String {
-        if ProcessInfo.processInfo.environment["P2_VISION_STEREO_AUDIT"] == "1" {
-            return "Stereo renderer audit: fixed eye separation, no tracked headset pose."
-        }
-        return "Expand to play around you. Pause, or hold both stick buttons, to come back."
+    private var stereoAuditMessage: String? {
+        guard ProcessInfo.processInfo.environment["P2_VISION_STEREO_AUDIT"] == "1" else { return nil }
+        return "Stereo renderer audit: fixed eye separation, no tracked headset pose."
     }
 
     private var library: some View {
@@ -387,8 +387,10 @@ private struct PortalGameSurface: UIViewRepresentable {
     func makeCoordinator() -> PortalGameSurfaceRenderer { PortalGameSurfaceRenderer(onAspect: onAspect) }
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        view.isOpaque = true
+        view.layer.isOpaque = true
         view.colorPixelFormat = .bgra8Unorm_srgb
-        view.clearColor = MTLClearColor(red: 0.015, green: 0.02, blue: 0.03, alpha: 1)
+        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.preferredFramesPerSecond = 60
         context.coordinator.configure(view)
         view.delegate = context.coordinator

@@ -169,7 +169,9 @@ class LauncherGateTests(unittest.TestCase):
         self.assertEqual(view.count('p2_vision_game_start('), 1)
         self.assertIn('if p2_vision_game_start(trigger) == 0 { return nil }', view)
         self.assertNotIn('engine test', view.lower())
-        self.assertIn('Check again', view)
+        self.assertIn('checkAgain: { Task { await refresh("check-again", start: false) } }', view)
+        launcher = (ROOT / 'visionos/Sources/PortalLauncherView.swift').read_text()
+        self.assertIn('Button("Check Again", action: checkAgain)', launcher)
         self.assertIn('game files are missing', view)
         self.assertIn('the campaign maps (game/portal2/maps) are missing', view)
 

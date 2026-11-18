@@ -9,23 +9,30 @@ fragment float4 p2_game_fragment(GameRaster input [[stage_in]], texture2d<float>
     texture2d<float> rightEye [[texture(1)]],constant uint &paired [[buffer(0)]]) {
     constexpr sampler sample(filter::linear, address::clamp_to_edge);
     // The native GPU probe verifies IOSurface row 0 is GL's bottom row.
+    // The engine's alpha channel is not window coverage.
     if (paired) {
-        if (input.uv.x >= 0.5) return rightEye.sample(sample,float2((input.uv.x-0.5)*2,input.uv.y));
-        return source.sample(sample,float2(input.uv.x*2,input.uv.y));
+        if (input.uv.x >= 0.5) return float4(rightEye.sample(sample, float2((input.uv.x - 0.5) * 2, input.uv.y)).rgb, 1);
+        return float4(source.sample(sample, float2(input.uv.x * 2, input.uv.y)).rgb, 1);
     }
-    return source.sample(sample, input.uv);
+    return float4(source.sample(sample, input.uv).rgb, 1);
+}
+
+// Give the compositor a finite surface for the opaque color-only eye image.
+vertex GameRaster p2_world_vertex(uint id [[vertex_id]], constant float &depth [[buffer(1)]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return {float4(uv * 2 - 1, depth, 1), uv};
 }
 
 // The source projection is the symmetric frustum the engine rendered with,
-// covering this eye's asymmetric compositor view. z = 0 is the reverse-Z far
-// plane; both projections share the eye origin, so only the ray matters.
+// covering this eye's asymmetric compositor view. Use the far-plane ray for
+// this RGB lookup independently of the depth submitted to the compositor.
 fragment float4 p2_world_fragment(GameRaster input [[stage_in]], texture2d<float> source [[texture(0)]],
     constant float4x4 &sourceClipFromCurrentClip [[buffer(1)]]) {
     float4 clip = sourceClipFromCurrentClip * float4(input.uv * 2 - 1, 0, 1);
     float2 uv = clip.xy / clip.w * 0.5 + 0.5;
     if (any(uv < 0) || any(uv > 1)) return float4(0,0,0,1);
     constexpr sampler sample(filter::linear,address::clamp_to_edge);
-    return source.sample(sample,uv);
+    return float4(source.sample(sample, uv).rgb, 1);
 }
 
 vertex GameRaster p2_menu_vertex(uint id [[vertex_id]],constant float4x4 &mvp [[buffer(1)]]) {
@@ -35,7 +42,7 @@ vertex GameRaster p2_menu_vertex(uint id [[vertex_id]],constant float4x4 &mvp [[
 }
 fragment float4 p2_menu_fragment(GameRaster input [[stage_in]],texture2d<float> source [[texture(0)]]) {
     constexpr sampler sample(filter::linear,address::clamp_to_edge);
-    return source.sample(sample,input.uv);
+    return float4(source.sample(sample, input.uv).rgb, 1);
 }
 
 // Sense controller aiming laser, drawn over the (depthless) game image. All

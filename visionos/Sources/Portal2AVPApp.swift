@@ -5,7 +5,7 @@ import CompositorServices
 struct Portal2AVPApp: App {
     var body: some Scene {
         #if P2_GAME
-        WindowGroup(id: PortalGameFlow.windowID) { PortalGameView() }.defaultSize(width: 1000, height: 680)
+        WindowGroup(id: PortalGameFlow.windowID) { PortalGameView() }.defaultSize(width: 1000, height: 562.5)
         // Opened with its attempt number, so each layer is matched to the
         // attempt that asked for it (PortalGameFlow).
         ImmersiveSpace(id: PortalGameFlow.spaceID, for: UInt64.self) { attempt in
