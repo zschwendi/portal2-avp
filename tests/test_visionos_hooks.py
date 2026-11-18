@@ -149,6 +149,9 @@ class OwnedBinaryTests(unittest.TestCase):
     def test_owned_client_profile_unchanged(self):
         result = visionos_hooks.audit(owned_root() / 'portal2/bin/linux32/client.so')
         self.assertEqual((result['vtable_rva'], result['render_view_rva']), (0x142c5a0, 0xda6230))
+        self.assertEqual([entry['paint_rva'] for entry in result['crosshair']],
+                         [0xb382c0, 0xb38ba0, 0xbdc210, 0xbdc240])
+        self.assertEqual(len({entry['slot_rva'] for entry in result['crosshair']}), 4)
         self.assertFalse(result['runtime_validated'])
 
     def test_owned_engine_profile(self):

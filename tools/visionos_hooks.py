@@ -20,6 +20,13 @@ from elfprep import Elf
 ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_CLIENT = '9dd3792c3a12eeb9bfa6b6befe6340da20820287c9ac06189755515555fa8143'
 RENDER_PREFIX = bytes.fromhex('5589e557565383ec648b45086a008b5d0c')
+# Both HUD crosshairs implement Paint on their primary table and on the
+# vgui::Panel secondary table (52 bytes into the complete object). In each
+# class both entries reach the same drawing implementation.
+CROSSHAIR_PAINT = (
+    (b'13CHudCrosshair', '5557565381ec1c0100008b9c2430010000', '836c240434e916f7ffff'),
+    (b'19CHudPortalCrosshair', '5383ec088b5c24108b838c01000085c0', '5383ec088b5c24108b835801000085c0'),
+)
 SUPPORTED_ENGINE = '3bdd4bf75ed7e03e7795dc0ad12128ad7549852b5f15053e9d54a164df74a199'
 ENGINE_CLIENT_INTERFACE = 'VEngineClient015'
 # IVEngineClient GetViewAngles/SetViewAngles(QAngle &), Linux i386 cdecl with
@@ -99,7 +106,11 @@ def _executable(elf, value):
 
 
 def primary_vtable(elf, rtti_name, entries):
-    """The one vtable with offset-to-top 0 for an RTTI name, and its first entries."""
+    """The one vtable for the complete object, and its first entries."""
+    return _vtable(elf, rtti_name, 0, range(entries))
+
+
+def _vtable(elf, rtti_name, object_offset, slots):
     name_offset = elf.data.find(rtti_name + b'\0')
     while name_offset > 0 and elf.data[name_offset - 1] != 0:
         name_offset = elf.data.find(rtti_name + b'\0', name_offset + 1)
@@ -115,13 +126,14 @@ def primary_vtable(elf, rtti_name, entries):
             continue
         for info_pointer in _sites(elf, typeinfo):
             table = _address(elf, info_pointer + 4)
-            if table is None or info_pointer < 4 or struct.unpack_from('<i', elf.data, info_pointer - 4)[0] != 0:
+            if (table is None or info_pointer < 4 or
+                    struct.unpack_from('<i', elf.data, info_pointer - 4)[0] != -object_offset):
                 continue
-            values = struct.unpack_from(f'<{entries}I', elf.data, info_pointer + 4)
+            values = tuple(struct.unpack_from('<I', elf.data, info_pointer + 4 + 4 * slot)[0] for slot in slots)
             if all(_executable(elf, value) for value in values):
                 candidates.append((table, values))
     if len(candidates) != 1:
-        raise ValueError(f'Expected one primary {rtti_name.decode()} vtable, found {len(candidates)}')
+        raise ValueError(f'Expected one {rtti_name.decode()} vtable at object offset {object_offset}, found {len(candidates)}')
     return candidates[0]
 
 
@@ -135,8 +147,18 @@ def audit(path):
     offset = elf.v2o(render)
     if elf.data[offset:offset + len(RENDER_PREFIX)] != RENDER_PREFIX:
         raise ValueError('RenderView entry signature mismatch')
+    crosshair = []
+    for name, primary_signature, panel_signature in CROSSHAIR_PAINT:
+        for object_offset, slot, signature in ((0, 23, primary_signature), (52, 129, panel_signature)):
+            vtable, (paint,) = _vtable(elf, name, object_offset, (slot,))
+            start = elf.v2o(paint)
+            expected = bytes.fromhex(signature)
+            if elf.data[start:start + len(expected)] != expected:
+                raise ValueError(f'{name.decode()} Paint entry signature mismatch at object offset {object_offset}')
+            crosshair.append(dict(slot_rva=vtable + 4 * slot, paint_rva=paint, signature=signature))
     return dict(client_sha256=digest, vtable_rva=table, render_view_slot=6,
                 render_view_rva=render, signature=RENDER_PREFIX.hex(),
+                crosshair=crosshair,
                 setup_size=260, fov_offset=104, origin_offset=112, angles_offset=124,
                 aspect_offset=152, offcenter_top_offset=240, offcenter_flags_offset=256,
                 abi_layout_source='p2sr/SourceAutoRecord src/Utils/SDK/CViewSetup.hpp',
@@ -399,6 +421,17 @@ def header_source(result, engine=None, aim=None):
         f'#define P2_XR_RENDER_VIEW_RVA 0x{result["render_view_rva"]:x}u\n' +
         f'#define P2_XR_VIEW_SETUP_SIZE {result["setup_size"]}u\n' +
         _bytes('p2_xr_render_signature', result['signature']))
+    crosshair = result.get('crosshair', [])
+    source += f'#define P2_XR_CROSSHAIR_PAINT_COUNT {len(crosshair)}\n'
+    if crosshair:
+        for i, entry in enumerate(crosshair):
+            source += _bytes(f'p2_xr_crosshair_signature_{i}', entry['signature'])
+        source += ('static const struct { unsigned slot, paint, length; const unsigned char *signature; } '
+                   'p2_xr_crosshair_paint[] = {\n')
+        for i, entry in enumerate(crosshair):
+            name = f'p2_xr_crosshair_signature_{i}'
+            source += f'    {{0x{entry["slot_rva"]:x}u, 0x{entry["paint_rva"]:x}u, sizeof({name}), {name}}},\n'
+        source += '};\n'
     if not engine:
         source += '#define P2_XR_HEAD_AIM_PROFILE 0 /* engine.so audit failed: head aim off */\n'
     else:

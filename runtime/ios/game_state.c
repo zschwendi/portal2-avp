@@ -27,6 +27,10 @@
 static uint32_t engine_vgui;      // objet IEngineVGui invité (0 : pas encore)
 static int ui_visible = 1;        // menus au démarrage
 static _Atomic int ui_visible_shared = 1;   // même valeur, lisible hors du thread du jeu (visionOS)
+#if TARGET_OS_VISION
+static _Atomic int ui_ready_shared;
+int rt_ios_game_ui_ready_shared(void) { return atomic_load_explicit(&ui_ready_shared, memory_order_relaxed); }
+#endif
 static uint64_t next_query, next_lookup;
 
 int rt_ios_game_ui_visible(void) { return ui_visible; }
@@ -236,6 +240,9 @@ void rt_ios_game_state_poll(void) {
     if (visible != ui_visible) fprintf(stderr, "[ios] interface du jeu %s\n", visible ? "affichée" : "masquée");
     ui_visible = visible;
     atomic_store_explicit(&ui_visible_shared, visible, memory_order_relaxed);
+#if TARGET_OS_VISION
+    atomic_store_explicit(&ui_ready_shared, 1, memory_order_relaxed);
+#endif
     if (linear_wanted || saved_response[0]) update_move_response(c);
     if (pending_command[0]) { char line[256]; snprintf(line, sizeof(line), "%s", pending_command); pending_command[0] = 0; run_console_command(c, line); }
     autoexec(c);

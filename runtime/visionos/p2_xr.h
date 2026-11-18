@@ -134,6 +134,18 @@ typedef struct { uint32_t latched; } P2XRSnapTurn;
 // push past P2_XR_SNAP_ENGAGE; re-armed below P2_XR_SNAP_RELEASE.
 float p2_xr_snap_turn(P2XRSnapTurn *state, float turn_x, float step_degrees);
 float p2_xr_smooth_turn(float turn_x, float degrees_per_second, float seconds);
+
+// 117 smooth-stick yaw at full deflection. The caller owns the active input
+// source and resets this state on menu, disconnect, recenter or mode changes.
+#define P2_XR_117_SMOOTH_RATE 180.0f
+typedef struct {
+    double timestamp, velocity;
+    uint32_t has_timestamp, armed;
+} P2XRSmoothTurn;
+// Feed each presentation timestamp once. look_y participates only in detecting
+// neutral release. Output is a Source yaw delta (positive stick turns right).
+float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float turn_x, float look_y,
+                           float degrees_per_second, double timestamp);
 // Numeric setting text (environment). *value is always usable: 0 unset,
 // 1 parsed, -1 rejected (fallback kept).
 int p2_xr_setting(const char *text, float fallback, float low, float high, float *value);

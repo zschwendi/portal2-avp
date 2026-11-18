@@ -40,7 +40,7 @@ struct PortalGameView: View {
         // Hidden while a transition is in flight or the space presents.
         .ornament(visibility: showsGame && flow.phase == .window ? .visible : .hidden,
                   attachmentAnchor: .scene(.topTrailing)) {
-            PortalExpandControl(enabled: flow.canExpand) { Task { await flow.expand() } }
+            PortalExpandControl(enabled: flow.canExpand(from: windowToken)) { Task { await flow.expand(from: windowToken) } }
         }
         .ornament(visibility: showsGame && flow.phase == .window ? .visible : .hidden,
                   attachmentAnchor: .scene(.topLeading)) {
@@ -78,14 +78,26 @@ struct PortalGameView: View {
     private var game: some View {
         ZStack {
             Color.black
-            PortalGameSurface(onAspect: { aspect = $0 }).aspectRatio(aspect, contentMode: .fit)
+            PortalGameSurface(onAspect: { aspect = $0 }, onPicture: { flow.windowFramePresented(windowToken) })
+                .aspectRatio(aspect, contentMode: .fit)
         }
         .ignoresSafeArea()
         .overlay {
             if flow.phase == .opening {
-                ProgressView("Opening immersive view\u{2026}").padding(24).glassBackgroundEffect()
-            } else if !flow.engineFrames {
-                ProgressView("Starting Portal 2\u{2026}").padding(24).glassBackgroundEffect()
+                PortalPanel { ProgressView("Opening immersive view\u{2026}").padding(8) }
+                    .portalThemed()
+                    .allowsHitTesting(false)
+            } else if !flow.windowHasPicture(windowToken) {
+                ZStack {
+                    PortalBackdrop()
+                    if flow.hasPresentedImmersive {
+                        ProgressView("Restoring the game window\u{2026}")
+                    } else {
+                        ProgressView("Starting Portal 2\u{2026}")
+                    }
+                }
+                .portalThemed()
+                .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .bottom) {
@@ -384,7 +396,8 @@ private struct PortalExpandControl: View {
 
 private struct PortalGameSurface: UIViewRepresentable {
     let onAspect: @MainActor @Sendable (Double) -> Void
-    func makeCoordinator() -> PortalGameSurfaceRenderer { PortalGameSurfaceRenderer(onAspect: onAspect) }
+    let onPicture: @MainActor @Sendable () -> Void
+    func makeCoordinator() -> PortalGameSurfaceRenderer { PortalGameSurfaceRenderer(onAspect: onAspect, onPicture: onPicture) }
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.isOpaque = true
@@ -399,13 +412,20 @@ private struct PortalGameSurface: UIViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {}
 }
 
-private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
+private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
-    private var reported = false
     private var aspect = 0.0
+    private var candidateSize: SIMD2<UInt32>?
+    private var candidateSequence: UInt64 = 0
+    private let reportLock = NSLock()
+    private var firstCompletionClaimed = false
     private let onAspect: @MainActor @Sendable (Double) -> Void
-    init(onAspect: @escaping @MainActor @Sendable (Double) -> Void) { self.onAspect = onAspect }
+    private let onPicture: @MainActor @Sendable () -> Void
+    init(onAspect: @escaping @MainActor @Sendable (Double) -> Void, onPicture: @escaping @MainActor @Sendable () -> Void) {
+        self.onAspect = onAspect
+        self.onPicture = onPicture
+    }
     @MainActor func configure(_ view: MTKView) {
         guard p2_xr_abi_version() == P2_XR_ABI_VERSION else { return }
         guard let device = view.device, let library = device.makeDefaultLibrary() else { return }
@@ -422,57 +442,71 @@ private final class PortalGameSurfaceRenderer: NSObject, MTKViewDelegate {
         // While the immersive renderer owns engine frames, keep the last picture;
         // also while the engine returns from the immersive eye size, so the
         // window never adopts a near-square frame's aspect for a moment.
-        guard PortalPresentation.shared.windowOwns, p2_vision_display_restoring() == 0,
-              let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor,
-              let command = queue?.makeCommandBuffer() else { return }
         var frame = P2VisionGLFrame()
-        let leased = PortalPresentation.shared.acquireWindow(&frame)
-        if leased && frame.height > 0 {
-            let eyes = frame.kind == P2_VISION_DIAGNOSTIC_STEREO.rawValue ? 2.0 : 1.0
-            let next = Double(frame.width) * eyes / Double(frame.height)
-            if abs(next - aspect) > 0.001 {
-                aspect = next
-                let onAspect = self.onAspect
-                Task { @MainActor in onAspect(next) }
-            }
+        guard PortalPresentation.shared.acquireWindow(&frame) else { return }
+        let slot = frame.slot
+        var submitted = false
+        defer { if !submitted { p2_vision_gl_release(slot) } }
+        let paired = frame.kind == P2_VISION_DIAGNOSTIC_STEREO.rawValue
+        guard let pointer = frame.surface, frame.width > 0, frame.height > 0,
+              paired || PortalPresentation.usableMonoFrame(frame) else { return }
+        // Repeated draws of one leased frame aren't proof of a settled size.
+        let size = SIMD2(frame.width, frame.height)
+        if size != candidateSize {
+            candidateSize = size
+            candidateSequence = frame.sequence
+            return
         }
-        var texture: MTLTexture?
+        guard frame.sequence != candidateSequence, let device = view.device, let pipeline else { return }
+        let surface = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb,
+            width: Int(frame.width), height: Int(frame.height), mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else { return }
         var rightTexture: MTLTexture?
-        if leased, let pointer = frame.surface {
-            let surface = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb,
-                width: Int(frame.width), height: Int(frame.height), mipmapped: false)
-            descriptor.usage = .shaderRead
-            descriptor.storageMode = .shared
-            texture = view.device?.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
-            if frame.kind == P2_VISION_DIAGNOSTIC_STEREO.rawValue, let pointer = frame.right_surface {
-                let right = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
-                rightTexture = view.device?.makeTexture(descriptor: descriptor,iosurface: right,plane: 0)
-            }
+        if paired, let pointer = frame.right_surface {
+            let right = Unmanaged<IOSurfaceRef>.fromOpaque(pointer).takeUnretainedValue()
+            rightTexture = device.makeTexture(descriptor: descriptor, iosurface: right, plane: 0)
         }
-        if let encoder = command.makeRenderCommandEncoder(descriptor: pass) {
-            if let texture, let pipeline {
-                encoder.setRenderPipelineState(pipeline)
-                encoder.setFragmentTexture(texture, index: 0)
-                encoder.setFragmentTexture(rightTexture ?? texture,index: 1)
-                var stereoFlags = SIMD2<UInt32>(rightTexture == nil ? 0 : 1, frame.flip_left_y)
-                encoder.setFragmentBytes(&stereoFlags, length: MemoryLayout<SIMD2<UInt32>>.size, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-                if !reported {
-                    reported = true
-                    NSLog("[vision-game] Actual engine texture submitted: sequence=%llu %ux%u", frame.sequence, frame.width, frame.height)
-                    Task { @MainActor in
-                        PortalController.reportControllers()
-                        PortalGameFlow.shared.engineFrameSeen()
-                    }
+        guard let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor,
+              let command = queue?.makeCommandBuffer(),
+              let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
+        let next = Double(frame.width) * (rightTexture == nil ? 1 : 2) / Double(frame.height)
+        if abs(next - aspect) > 0.001 {
+            aspect = next
+            let onAspect = self.onAspect
+            Task { @MainActor in onAspect(next) }
+        }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.setFragmentTexture(rightTexture ?? texture, index: 1)
+        var stereoFlags = SIMD2<UInt32>(rightTexture == nil ? 0 : 1, frame.flip_left_y)
+        encoder.setFragmentBytes(&stereoFlags, length: MemoryLayout<SIMD2<UInt32>>.size, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        if reportLock.withLock({
+            guard !firstCompletionClaimed else { return false }
+            firstCompletionClaimed = true
+            return true
+        }) {
+            let sequence = frame.sequence
+            command.addCompletedHandler { [weak self] command in
+                guard let self else { return }
+                guard command.status == .completed else {
+                    self.reportLock.withLock { self.firstCompletionClaimed = false }
+                    return
+                }
+                NSLog("[vision-game] Actual engine texture submitted: sequence=%llu %ux%u", sequence, size.x, size.y)
+                let onPicture = self.onPicture
+                Task { @MainActor in
+                    PortalController.reportControllers()
+                    onPicture()
                 }
             }
-            encoder.endEncoding()
         }
-        if leased {
-            let slot = frame.slot
-            command.addCompletedHandler { _ in p2_vision_gl_release(slot) }
-        }
+        command.addCompletedHandler { _ in p2_vision_gl_release(slot) }
+        submitted = true
         command.present(drawable)
         command.commit()
     }

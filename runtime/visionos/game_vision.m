@@ -10,7 +10,6 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
-#include <time.h>
 #include <unistd.h>
 #include "game_vision.h"
 #include "input_vision.h"
@@ -19,10 +18,12 @@
 
 int p2_main(int argc, char **argv);
 int rt_ios_game_ui_visible_shared(void); // runtime/ios/game_state.c
+int rt_ios_game_ui_ready_shared(void);
 static _Atomic int state;
 static _Atomic int started_fps_limit;
 int p2_vision_game_state(void) { return atomic_load(&state); }
 int p2_vision_game_ui_visible(void) { return atomic_load(&state) == 1 && rt_ios_game_ui_visible_shared(); }
+int p2_vision_game_ui_ready(void) { return atomic_load(&state) == 1 && rt_ios_game_ui_ready_shared(); }
 
 int p2_vision_game_hfr_target(void) {
     struct utsname device;
@@ -41,14 +42,11 @@ int p2_vision_game_fps_limit(void) {
 }
 
 // Immersive eye size request: width << 32 | height, 0 for the windowed size.
-static _Atomic uint64_t eye_request, eye_withdrawn_ns;
+static _Atomic uint64_t eye_request;
 static _Atomic int eye_mode;
 void p2_vision_request_eye_size(int width, int height) {
     uint64_t value = width > 0 && height > 0 && width <= 8192 && height <= 8192 ?
         (uint64_t)(uint32_t)width << 32 | (uint32_t)height : 0;
-    // Stamp before withdrawing, so a reader never pairs 0 with an old stamp.
-    // Callers serialize (PortalPresentation's lock).
-    if (!value && atomic_load(&eye_request)) atomic_store(&eye_withdrawn_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     atomic_store(&eye_request, value);
 }
 void p2_vision_requested_eye_size(int *width, int *height) {
@@ -58,13 +56,8 @@ void p2_vision_requested_eye_size(int *width, int *height) {
 }
 void p2_vision_set_eye_mode(int active) { atomic_store(&eye_mode, active != 0); }
 int p2_vision_display_restoring(void) {
-    if (!atomic_load(&eye_mode) || atomic_load(&eye_request)) return 0;
-    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - atomic_load(&eye_withdrawn_ns) < 2500000000ull;
+    return atomic_load(&eye_mode) && !atomic_load(&eye_request);
 }
-// Placeholder until the engine-side controller aim code links its strong
-// definition (a strong symbol replaces this weak one at link time).
-__attribute__((weak)) int p2_vision_controller_aim_active(void) { return -1; }
-
 // ---- Owned-content gate ------------------------------------------------------
 // The engine must never start with missing or short VPK archives: it dies
 // after "Tried to Seek/Read NULL file handle!" with no crash report.

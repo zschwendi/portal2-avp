@@ -1,6 +1,6 @@
 #pragma once
 // Tracked PSVR2 Sense portal-gun aim (runtime/visionos/aim_vision.c).
-// Engine side only; Swift reads p2_vision_controller_aim_active (view_vision.h).
+// Engine side only.
 #include "rt.h"
 #include "p2_xr.h"
 

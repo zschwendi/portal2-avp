@@ -112,12 +112,6 @@ static int aim_live(P2XRAimBasis *current, P2XRFrame *latest) {
     pthread_mutex_unlock(&basis_lock);
     return p2_xr_aim_fresh(current, session, latest, monotonic());
 }
-int p2_vision_controller_aim_active(void) {
-    P2XRAimBasis current;
-    P2XRFrame latest;
-    return aim_live(&current, &latest);
-}
-
 // Unused when the profile header disables controller aim.
 __attribute__((unused)) static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
 __attribute__((unused)) static vector_float3 read_vector(uint32_t address) {

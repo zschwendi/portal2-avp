@@ -380,6 +380,41 @@ float p2_xr_smooth_turn(float x, float rate, float seconds) {
     // A stalled frame must not become one large turn.
     return (x > 0 ? -amount : amount) * rate * fmaxf(0, fminf(seconds, 0.1f));
 }
+float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float x, float y, float rate, double timestamp) {
+    if (!state) return 0;
+    if (!isfinite(x) || !isfinite(y) || !isfinite(rate) || rate <= 0 ||
+        !isfinite(timestamp) || timestamp < 0) {
+        *state = (P2XRSmoothTurn){0};
+        return 0;
+    }
+    double elapsed = state->has_timestamp ? timestamp - state->timestamp : 0;
+    if (state->has_timestamp && elapsed == 0) return 0;
+    if (elapsed < 0 || elapsed > 0.10) {
+        *state = (P2XRSmoothTurn){0};
+        elapsed = 0;
+    }
+    state->timestamp = timestamp;
+    state->has_timestamp = 1;
+
+    // 117's axial deadzone and squared response. Source yaw increases leftward.
+    const float deadzone = 0.20f;
+    if (hypotf(x, y) < deadzone) state->armed = 1;
+    if (!state->armed || fabsf(x) <= deadzone) {
+        state->velocity = 0;
+        return 0;
+    }
+    double amount = (fminf(1, fabsf(x)) - deadzone) / (1 - deadzone);
+    double target = -copysign(rate * amount * amount, x);
+    if (state->velocity * target < 0) state->velocity = 0;
+
+    // Integrate 117's 120 ms ramp over the entire sample interval so 90 and
+    // 120 Hz reach the same angle. Releasing or reversing never coasts.
+    const double time_constant = 0.12;
+    double blend = -expm1(-elapsed / time_constant);
+    double turn = target * elapsed + (state->velocity - target) * time_constant * blend;
+    state->velocity += (target - state->velocity) * blend;
+    return (float)turn;
+}
 int p2_xr_setting(const char *text, float fallback, float low, float high, float *value) {
     if (value) *value = fallback;
     if (!text || !*text) return 0;

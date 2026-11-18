@@ -77,14 +77,13 @@ final class PortalRenderer: @unchecked Sendable {
     private var spatial: (any PortalSpatialSource)?
     #if P2_GAME
     private let menuPipeline: MTLRenderPipelineState
-    private let laserPipeline: MTLRenderPipelineState
-    private let overlayDepth: MTLDepthStencilState
+    private let menuDepth: MTLDepthStencilState
+    private static let menuDistance: Float = 2
     private var anchors: [UInt64: DeviceAnchor] = [:]
     // originFromPanel of the menu panel shown now: placed when the menu first
     // appears, kept until a stereo world frame shows (the menu hid).
     private var menuPanel: simd_float4x4?
     private var eyeSizeRequested = false
-    private var laserShown = false
     private var reportedGame = false
     private var frameLeases: [Int32] = []
     private var cadenceStart: Double?
@@ -177,18 +176,6 @@ final class PortalRenderer: @unchecked Sendable {
         descriptor.vertexFunction = library.makeFunction(name: "p2_menu_vertex")
         descriptor.fragmentFunction = library.makeFunction(name: "p2_menu_fragment")
         menuPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
-        // Aim laser: straight alpha over the game image.
-        descriptor.vertexFunction = library.makeFunction(name: "p2_laser_vertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "p2_laser_fragment")
-        let blend = descriptor.colorAttachments[0]!
-        blend.isBlendingEnabled = true
-        blend.rgbBlendOperation = .add
-        blend.alphaBlendOperation = .add
-        blend.sourceRGBBlendFactor = .sourceAlpha
-        blend.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        blend.sourceAlphaBlendFactor = .one
-        blend.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        laserPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         #endif
         let depthDescriptor = MTLDepthStencilDescriptor()
         depthDescriptor.isDepthWriteEnabled = true
@@ -198,13 +185,14 @@ final class PortalRenderer: @unchecked Sendable {
         }
         self.depth = depth
         #if P2_GAME
-        // Overlays on the depthless game image: always drawn, real depth kept
-        // for the compositor.
+        // The opaque menu scene uses one depth plane. Compositor reprojection
+        // would otherwise stretch the edge across the jump to the empty room.
+        depthDescriptor.isDepthWriteEnabled = false
         depthDescriptor.depthCompareFunction = .always
-        guard let overlayDepth = device.makeDepthStencilState(descriptor: depthDescriptor) else {
+        guard let menuDepth = device.makeDepthStencilState(descriptor: depthDescriptor) else {
             throw NSError(domain: "Portal2XR", code: 2)
         }
-        self.overlayDepth = overlayDepth
+        self.menuDepth = menuDepth
         #endif
         let mesh = Self.calibrationMesh()
         vertexCount = mesh.count
@@ -389,7 +377,7 @@ final class PortalRenderer: @unchecked Sendable {
         if builtIn { p2_xr_publish_frame(session, &xr) }
         #if P2_GAME
         encodeGame(drawable: drawable,command: command,tracked: tracked,currentAnchor: anchor,builtIn: builtIn,
-                   aim: xr.controllers.1, timestamp: timestamp)
+                   timestamp: timestamp)
         #else
         if originFromScene == nil {
             var origin = matrix_identity_float4x4
@@ -464,7 +452,7 @@ final class PortalRenderer: @unchecked Sendable {
     }
 
     private func encodeGame(drawable: LayerRenderer.Drawable,command: MTLCommandBuffer,
-                            tracked: Bool,currentAnchor: DeviceAnchor?,builtIn: Bool,aim: P2XRControllerPose,
+                            tracked: Bool,currentAnchor: DeviceAnchor?,builtIn: Bool,
                             timestamp: Double) {
         #if targetEnvironment(simulator)
         let preview = simulatorPreview
@@ -479,10 +467,10 @@ final class PortalRenderer: @unchecked Sendable {
             frame.eye_count == 2 && frame.xr_session == session && frame.render_pose.tracked != 0
         let sourceAnchor = stereo ? anchors[frame.render_pose.sequence] : nil
         let worldReady = tracked && stereo && sourceAnchor != nil
-        let panelReady = (tracked || preview) && leased && frame.kind == P2_VISION_MONO.rawValue
+        let panelReady = (tracked || preview) && leased && PortalPresentation.usableMonoFrame(frame)
         // The anchor must be the pose that rendered these pixels. A newer
         // compositor pose must never be attached to a stale engine image.
-        // Overlays (menu panel, aim laser) are drawn from the attached pose.
+        // Menu panels use the current tracking pose.
         var renderHead: simd_float4x4?
         #if targetEnvironment(simulator)
         // Draw the actual game surface in a fixed panel for lifecycle testing.
@@ -491,7 +479,6 @@ final class PortalRenderer: @unchecked Sendable {
         #else
         if worldReady {
             drawable.deviceAnchor = sourceAnchor
-            renderHead = sourceAnchor?.originFromAnchorTransform
         } else if panelReady {
             drawable.deviceAnchor = currentAnchor
             renderHead = currentAnchor?.originFromAnchorTransform
@@ -499,17 +486,18 @@ final class PortalRenderer: @unchecked Sendable {
         #endif
         if worldReady { menuPanel = nil }
         else if panelReady, menuPanel == nil, let head = renderHead {
-            let panel = Self.panelPose(head: head, distance: 2)
+            let panel = Self.panelPose(head: head, distance: Self.menuDistance)
             menuPanel = panel
             NSLog("[P2XR] %@ panel placed 2 m ahead at (%.2f, %.2f, %.2f) m, yaw only",
                   preview ? "Simulator" : "Tracked menu", panel.columns.3.x, panel.columns.3.y, panel.columns.3.z)
         }
-        let laser = worldReady && renderHead != nil ? laserSegment(aim) : nil
         let left = leased ? gameTexture(frame.surface,frame: frame) : nil
         let right = stereo ? gameTexture(frame.right_surface,frame: frame) : nil
         var eyesDrawn = 0
         for (eye,view) in drawable.views.enumerated() {
             let index = view.textureMap.textureIndex, slice = view.textureMap.sliceIndex
+            let projection = drawable.computeProjection(convention: .rightUpBack,viewIndex: eye)
+            let range = drawable.depthRange
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = drawable.colorTextures[index]
             pass.colorAttachments[0].slice = slice
@@ -521,6 +509,13 @@ final class PortalRenderer: @unchecked Sendable {
             pass.depthAttachment.loadAction = .clear
             pass.depthAttachment.storeAction = .store
             pass.depthAttachment.clearDepth = 0
+            if panelReady {
+                // Preserve the original spatial panel projection in color,
+                // with a continuous depth surface across the dark backdrop.
+                let distance = min(max(Self.menuDistance, range.y), range.x)
+                let clip = projection * SIMD4<Float>(0, 0, -distance, 1)
+                pass.depthAttachment.clearDepth = Double(clip.z / clip.w)
+            }
             // Without its rate map a foveated texture is only cleared: drawing
             // in physical coordinates would misplace the image.
             guard applyRateMap(pass, drawable: drawable, index: index),
@@ -531,7 +526,6 @@ final class PortalRenderer: @unchecked Sendable {
             encoder.setViewport(view.textureMap.viewport)
             encoder.setDepthStencilState(depth)
             let texture = eye == 1 ? right : left
-            let projection = drawable.computeProjection(convention: .rightUpBack,viewIndex: eye)
             if worldReady, let texture {
                 encoder.setRenderPipelineState(pipeline)
                 encoder.setFragmentTexture(texture,index: 0)
@@ -543,26 +537,16 @@ final class PortalRenderer: @unchecked Sendable {
                 var crop = sourceProjection * simd_inverse(projection)
                 encoder.setFragmentBytes(&crop,length: MemoryLayout<simd_float4x4>.stride,index: 1)
                 // Use a finite background depth for compositor reprojection
-                // until the engine exports depth per pixel. Zero is the clear
-                // value, and leaves regions without the laser at empty depth.
-                let range = drawable.depthRange
+                // until the engine exports depth per pixel.
                 let distance = min(20, range.y + (range.x - range.y) * 0.5)
                 let projected = projection * SIMD4<Float>(0, 0, -distance, 1)
                 var backgroundDepth = projected.z / projected.w
                 encoder.setVertexBytes(&backgroundDepth, length: MemoryLayout<Float>.size, index: 1)
                 encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 3)
                 eyesDrawn += 1
-                if let laser, let head = renderHead {
-                    var uniforms = LaserUniforms(projection: projection, eyeFromOrigin: simd_inverse(head * view.transform),
-                                                 start: laser.start, end: laser.end)
-                    encoder.setRenderPipelineState(laserPipeline)
-                    encoder.setDepthStencilState(overlayDepth)
-                    encoder.setVertexBytes(&uniforms,length: MemoryLayout<LaserUniforms>.stride,index: 1)
-                    encoder.setFragmentBytes(&uniforms,length: MemoryLayout<LaserUniforms>.stride,index: 1)
-                    encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 12)
-                }
             } else if panelReady, let left, let panel = menuPanel, let head = renderHead {
                 encoder.setRenderPipelineState(menuPipeline)
+                encoder.setDepthStencilState(menuDepth)
                 encoder.setFragmentTexture(left,index: 0)
                 let half = Self.panelHalfSize(width: frame.width, height: frame.height)
                 let halfWidth = half.x, halfHeight = half.y
@@ -640,46 +624,6 @@ final class PortalRenderer: @unchecked Sendable {
         let right = simd_cross(forward, SIMD3<Float>(0, 1, 0))
         let position = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z) + forward * distance
         return simd_float4x4(columns: (SIMD4(right, 0), SIMD4<Float>(0, 1, 0, 0), SIMD4(-forward, 0), SIMD4(position, 1)))
-    }
-
-    // Matches LaserUniforms in GameTexture.metal (192 bytes).
-    private struct LaserUniforms {
-        var projection: simd_float4x4
-        var eyeFromOrigin: simd_float4x4
-        var start: SIMD4<Float>
-        var end: SIMD4<Float>
-        var color = SIMD4<Float>(0.55, 0.85, 1.0, 0.45)
-        var halfWidth: Float = 0.0012
-        var dotRadius: Float = 0.012
-        var padding = SIMD2<Float>(0, 0)
-    }
-
-    // 3 m aim laser from the right Sense controller's aim pose (ARKit origin
-    // space), starting 3 cm ahead of it; nil while controller aim is off.
-    private func laserSegment(_ aim: P2XRControllerPose) -> (start: SIMD4<Float>, end: SIMD4<Float>)? {
-        guard aim.tracked != 0 else { return nil }
-        // Engine-side Sense portal aim (aim_vision.c). The weak -1 fallback in
-        // game_vision.m only answers in builds without aim_vision.c.
-        let engine = p2_vision_controller_aim_active()
-        let active: Bool
-        if engine >= 0 { active = engine != 0 }
-        else {
-            // Fallback: the Sense pair owns the published input; the right
-            // controller's tracking is checked by the guard above.
-            var input = P2XRInput()
-            active = p2_xr_read(session, nil, &input) != 0 && input.connected != 0 && input.spatial != 0
-        }
-        guard active else { return nil }
-        let pose = aim.tracking_from_aim
-        let axis = -SIMD3<Float>(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z)
-        guard simd_length(axis) > 0.5 else { return nil }
-        let forward = simd_normalize(axis), origin = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
-        if !laserShown {
-            laserShown = true
-            NSLog("[P2XR] Aim laser shown from the right Sense controller (gate: %@)",
-                  engine >= 0 ? "engine controller aim" : "Sense pair owns input; engine aim query not linked")
-        }
-        return (SIMD4(origin + forward * 0.03, 1), SIMD4(origin + forward * 3, 1))
     }
 
     // Near-square per-eye engine size: the symmetric cover of the compositor

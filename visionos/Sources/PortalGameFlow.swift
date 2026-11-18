@@ -19,9 +19,16 @@ final class PortalPresentation: @unchecked Sendable {
 
     var windowOwns: Bool { lock.withLock { owner == 0 } }
 
+    static func usableMonoFrame(_ frame: P2VisionGLFrame) -> Bool {
+        // A resized ANGLE pbuffer can still contain a 640×480 boot viewport.
+        // Wait for the guest UI to initialize before accepting its mono image.
+        frame.kind == P2_VISION_MONO.rawValue && frame.surface != nil &&
+            frame.width > 0 && frame.height > 0 && p2_vision_game_ui_ready() != 0
+    }
+
     func acquireWindow(_ frame: inout P2VisionGLFrame) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard owner == 0 else { return false }
+        guard owner == 0, p2_vision_display_restoring() == 0 else { return false }
         return p2_vision_gl_acquire(&frame) != 0
     }
 
@@ -94,7 +101,8 @@ final class PortalGameFlow: ObservableObject {
 
     @Published private(set) var phase = Phase.window
     @Published private(set) var message: String?
-    @Published private(set) var engineFrames = false
+    @Published private var readyWindows = Set<UUID>()
+    @Published private(set) var hasPresentedImmersive = false
     @Published private(set) var renderersLive = 0
     @Published private(set) var dismissing = false
     private(set) var controlsSession: UInt64 = 0
@@ -119,8 +127,10 @@ final class PortalGameFlow: ObservableObject {
     private var dismissWindow: DismissWindowAction?
     private var observers: [NSObjectProtocol] = []
 
-    var canExpand: Bool {
-        phase == .window && renderersLive == 0 && !dismissing && engineFrames && p2_vision_game_state() == 1
+    func windowHasPicture(_ token: UUID) -> Bool { readyWindows.contains(token) }
+
+    func canExpand(from token: UUID) -> Bool {
+        phase == .window && renderersLive == 0 && !dismissing && windowHasPicture(token) && p2_vision_game_state() == 1
     }
 
     private init() {
@@ -160,19 +170,19 @@ final class PortalGameFlow: ObservableObject {
     }
 
     func windowDisappeared(_ token: UUID) {
+        readyWindows.remove(token)
         windowTokens.remove(token)
         retiredWindows.remove(token)
         log("Window disappeared (count \(windows), phase \(phase.rawValue))")
         if windows == 0 { detachWindowControls() }
     }
 
-    func engineFrameSeen() {
-        guard !engineFrames else { return }
-        engineFrames = true
+    func windowFramePresented(_ token: UUID) {
+        guard windowTokens.contains(token), !retiredWindows.contains(token), readyWindows.insert(token).inserted else { return }
         // Development auto-enter, once per process (not per reopened window).
         if !autoEnterTaken, ProcessInfo.processInfo.arguments.contains("--immersive-test") {
             autoEnterTaken = true
-            Task { await expand() }
+            Task { await expand(from: token) }
         }
     }
 
@@ -202,8 +212,8 @@ final class PortalGameFlow: ObservableObject {
 
     // MARK: Expand
 
-    func expand() async {
-        guard canExpand, let openSpace else { return }
+    func expand(from token: UUID) async {
+        guard canExpand(from: token), let openSpace else { return }
         attempt &+= 1
         let attempt = self.attempt
         phase = .opening
@@ -271,11 +281,13 @@ final class PortalGameFlow: ObservableObject {
 
     private func present() {
         deadline?.cancel()
+        hasPresentedImmersive = true
         phase = .presenting
         log("Attempt \(attempt) presenting; retiring the window (\(windows) visible)")
         // Unconditional: full immersion may hide a window without dismissing it.
         // Every current window is retired; the return path then reopens one.
         retiredWindows = windowTokens
+        readyWindows.subtract(retiredWindows)
         dismissWindow?.callAsFunction(id: Self.windowID)
         startMonitor()
     }

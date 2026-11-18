@@ -91,7 +91,7 @@ int rt_ios_console_command_now(const char *line);   // runtime/ios/game_state.c
 // The windowed restore needs a longer steady run (~1.5 s): loading-screen
 // refreshes are not steady that long, so no mode change lands mid-load.
 enum { MODE_STEADY_FRAMES = 12, MODE_RESTORE_FRAMES = 90, MODE_POLL_MS = 100, MODE_SETTLE_MS = 3000,
-       MODE_RETRY_MS = 2000, MODE_RESTORE_TRIES = 3 };
+       MODE_RETRY_MS = 2000, MODE_RESTORE_TRIES = 3, MODE_RESTORE_WAIT_MS = 12000 };
 int p2_vision_view_rendering(void);   // view_vision.c: inside the stereo RenderView pair
 static struct {
     int windowed_w, windowed_h;  // the player's windowed size, to restore
@@ -99,7 +99,7 @@ static struct {
     int failed_w, failed_h;      // eye size that did not take (this session)
     int changed;                 // we moved the engine away from windowed_w x h
     int pending, busy, restore_tries;
-    uint64_t next_ms, deadline_ms;
+    uint64_t next_ms, deadline_ms, restore_wait_deadline_ms;
 } mode;
 
 static int mode_steady(uint64_t now, int stereo, int frames) {
@@ -121,6 +121,12 @@ static void mode_command(int width, int height, uint64_t now, const char *why) {
     mode.busy = 0;
     mode.deadline_ms = issued ? now + MODE_SETTLE_MS : now;
 }
+static void adopt_windowed_mode(int width, int height, const char *reason) {
+    mode.windowed_w = width; mode.windowed_h = height;
+    mode.changed = 0; mode.restore_tries = 0; mode.restore_wait_deadline_ms = 0;
+    p2_vision_set_eye_mode(0);
+    fprintf(stderr,"[vision-mode] Keeping %dx%d as the windowed size (%s)\n",width,height,reason);
+}
 static void manage_video_mode(void) {
     if (mode.busy || p2_vision_view_rendering()) return;
     uint64_t now = SDL_GetTicks64();
@@ -136,6 +142,9 @@ static void manage_video_mode(void) {
     mode.next_ms = now + MODE_POLL_MS;
     p2_vision_gl_drawable_size(&w,&h);
     if (w <= 0 || h <= 0) return;
+    int immersive_requested = eye_w > 0 && eye_h > 0;
+    if (immersive_requested || !mode.changed) mode.restore_wait_deadline_ms = 0;
+    else if (!mode.restore_wait_deadline_ms) mode.restore_wait_deadline_ms = now + MODE_RESTORE_WAIT_MS;
     int restoring_target = mode.target_w == mode.windowed_w && mode.target_h == mode.windowed_h;
     if (mode.pending) {
         if (w == mode.target_w && h == mode.target_h) {
@@ -160,15 +169,12 @@ static void manage_video_mode(void) {
             p2_vision_set_eye_mode(!at_windowed);
             if (at_windowed) mode_command(mode.windowed_w,mode.windowed_h,now,"Re-applying the windowed size");
         } else if (++mode.restore_tries >= MODE_RESTORE_TRIES) {
-            fprintf(stderr,"[vision-mode] Keeping %dx%d as the windowed size; the window follows its aspect\n",w,h);
-            mode.windowed_w = w; mode.windowed_h = h;
-            mode.changed = 0; mode.restore_tries = 0;
-            p2_vision_set_eye_mode(0);
+            adopt_windowed_mode(w,h,"windowed mode failed to take");
         }
         return;
     }
     if (!mode.changed) { mode.windowed_w = w; mode.windowed_h = h; }
-    if (eye_w > 0 && eye_h > 0) {
+    if (immersive_requested) {
         if ((w == eye_w && h == eye_h) || (eye_w == mode.failed_w && eye_h == mode.failed_h)) return;
         if (!mode_steady(now,1,MODE_STEADY_FRAMES)) return;
         mode.changed = 1;
@@ -183,8 +189,8 @@ static void manage_video_mode(void) {
         p2_vision_set_eye_mode(0);
         return;
     }
-    if (!mode_steady(now,0,MODE_RESTORE_FRAMES)) return;
-    mode_command(mode.windowed_w,mode.windowed_h,now,"Windowed size");
+    if (mode_steady(now,0,MODE_RESTORE_FRAMES)) mode_command(mode.windowed_w,mode.windowed_h,now,"Windowed size");
+    else if (now >= mode.restore_wait_deadline_ms) adopt_windowed_mode(w,h,"no steady frames for a safe resize");
 }
 #endif
 

@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #ifndef P2_XR_HEAD_AIM_PROFILE
 #define P2_XR_HEAD_AIM_PROFILE 0 // profile predates the engine audit: no head aim
@@ -30,7 +29,8 @@ static P2XRBody body;
 static float previous_yaw;
 static unsigned stereo_frames;
 static uint32_t previous_buttons;
-static float units_per_meter = P2_XR_UNITS_PER_METER, snap_degrees = 45, smooth_rate;
+static uint32_t crosshair_base, skip_crosshair_paint;
+static float units_per_meter = P2_XR_UNITS_PER_METER, snap_degrees = 45, smooth_rate = P2_XR_117_SMOOTH_RATE;
 void rt_ios_game_state_poll(void);
 int rt_ios_game_ui_visible(void);
 static float field(const unsigned char *view, size_t offset);
@@ -40,6 +40,51 @@ static void put_vector(uint32_t address, unsigned offset, vector_float3 value) {
     put_float(address,offset,value.x); put_float(address,offset+4,value.y); put_float(address,offset+8,value.z);
 }
 static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
+
+// The reticle is guest HUD paint, independent of camera tracking and portal
+// aim. Replace only its two HUD classes' Paint entries during stereo capture.
+static int skip_paint(CPU *c, const char *name) {
+    if (strcmp(name, "__p2_vision_skip_crosshair_paint")) return 0;
+    static int reported;
+    if (!reported) {
+        reported = 1;
+        fprintf(stderr, "[vision-view] Skipped guest reticle paint during stereo capture\n");
+    }
+    c->eax = 0;
+    return 1;
+}
+RT_SHIM_PROVIDER(skip_paint)
+
+static void resolve_crosshair_paint(CPU *c, uint32_t base) {
+#if P2_XR_CROSSHAIR_PAINT_COUNT
+    for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i) {
+        uint32_t paint = base + p2_xr_crosshair_paint[i].paint;
+        uint32_t size = p2_xr_crosshair_paint[i].length;
+        if (R32(base + p2_xr_crosshair_paint[i].slot) != paint ||
+            memcmp(rt_span(c, paint, size), p2_xr_crosshair_paint[i].signature, size)) {
+            fprintf(stderr, "[vision-view] Guest reticle suppression unavailable: Paint profile mismatch\n");
+            return;
+        }
+    }
+    skip_crosshair_paint = rt_dynamic_import("__p2_vision_skip_crosshair_paint");
+    crosshair_base = base;
+#else
+    (void)c;
+    (void)base;
+#endif
+}
+
+static void hide_crosshair(int hidden) {
+#if P2_XR_CROSSHAIR_PAINT_COUNT
+    if (!skip_crosshair_paint) return;
+    for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i) {
+        W32(crosshair_base + p2_xr_crosshair_paint[i].slot,
+            hidden ? skip_crosshair_paint : crosshair_base + p2_xr_crosshair_paint[i].paint);
+    }
+#else
+    (void)hidden;
+#endif
+}
 
 // ---- Seated head aim --------------------------------------------------------
 // VEngineClient015 (engine.so CreateInterface) GetViewAngles/SetViewAngles,
@@ -56,7 +101,10 @@ static uint32_t aim_interface, aim_get, aim_set, aim_buffer;
 static uint64_t aim_session;    // tracked session whose head drives engine angles
 static unsigned aim_rebases;
 static P2XRSnapTurn snap;
-static double turn_clock;
+static P2XRSmoothTurn smooth_turn;
+static uint32_t turn_connected, turn_spatial;
+
+static void reset_smooth_turn(void) { smooth_turn = (P2XRSmoothTurn){0}; }
 
 static void aim_refuse(const char *reason) {
     aim_status = -1; aim_session = 0;
@@ -169,7 +217,7 @@ static void aim_release(CPU *c) {
     aim_session = 0;
     p2_vision_aim_clear();
     snap = (P2XRSnapTurn){0};
-    turn_clock = 0;
+    reset_smooth_turn();
 }
 static void aim_poll(void) {
     P2XRFrame pose; P2XRInput controls;
@@ -181,18 +229,19 @@ static void aim_poll(void) {
     if (aim_session && (failed || !p2_xr_session_active(aim_session))) { aim_release(c); return; }
     // Tracking lost or awaiting (re)alignment: keep the expectation; the
     // change is observed once tracking returns.
-    if (!live) { turn_clock = 0; return; }
+    if (!live) { reset_smooth_turn(); return; }
     rt_ios_game_state_poll();
     vector_float3 engine;
-    if (rt_ios_game_ui_visible() || !aim_observe(c,session,&engine)) { turn_clock = 0; return; }
-    if (aim_session == session) {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC,&now);
-        double seconds = (double)now.tv_sec + now.tv_nsec * 1e-9;
+    if (rt_ios_game_ui_visible() || !aim_observe(c,session,&engine)) { reset_smooth_turn(); return; }
+    if (controls.connected != turn_connected || controls.spatial != turn_spatial || !controls.connected) {
+        reset_smooth_turn();
+        turn_connected = controls.connected;
+        turn_spatial = controls.spatial;
+    }
+    if (aim_session == session && controls.connected) {
         float turn = smooth_rate > 0 ?
-            p2_xr_smooth_turn(controls.turn_x,smooth_rate,turn_clock > 0 ? (float)(seconds - turn_clock) : 0) :
+            p2_xr_117_smooth_turn(&smooth_turn,controls.turn_x,controls.look_y,smooth_rate,pose.presentation_time) :
             p2_xr_snap_turn(&snap,controls.turn_x,snap_degrees);
-        turn_clock = seconds;
         if (turn != 0) p2_xr_body_turn(&body,turn);
     }
     aim_drive(c,&pose,session,engine);
@@ -216,7 +265,10 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // aim_poll, 10 Hz). Never poll here: the poll also runs queued console
     // commands and autoexec, which must not execute inside RenderView.
     if (rt_ios_game_ui_visible() || view[32]) return 0;
-    if (session && (controls.buttons & P2_XR_RECENTER) && !(previous_buttons & P2_XR_RECENTER)) aligned_session = 0;
+    if (session && (controls.buttons & P2_XR_RECENTER) && !(previous_buttons & P2_XR_RECENTER)) {
+        aligned_session = 0;
+        reset_smooth_turn();
+    }
     previous_buttons = controls.buttons;
     vector_float3 origin = {field(view,112),field(view,116),field(view,120)};
     vector_float3 angles = {field(view,124),field(view,128),field(view,132)};
@@ -226,6 +278,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
         vector_float3 engine;
         int aim = aim_observe(c,session,&engine);
         if (aligned_session != session) {
+            reset_smooth_turn();
             if (p2_xr_body_align(&body,&pose,origin,aim ? engine.y : angles.y,units_per_meter)) aligned_session = session;
         } else {
             // Without head aim the engine yaw is stick-driven: follow it.
@@ -248,6 +301,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     matrix_float4x4 cover[2] = {matrix_identity_float4x4,matrix_identity_float4x4};
     float aspect = (float)width / (float)height;
     rendering = 1;
+    hide_crosshair(1);
     for (unsigned eye = 0; eye < 2; ++eye) {
         memcpy(GPTR(eye_views[eye]),camera,sizeof(camera));
         memcpy(GPTR(eye_hud[eye]),hud,sizeof(hud));
@@ -309,6 +363,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // the captured left image is complete. Mono fallback must restore eye 0.
     int marked = p2_vision_gl_mark_stereo(session,session ? &pose : NULL,diagnostic);
     if (!marked) goto mono;
+    hide_crosshair(0);
     rendering = 0;
     if (marked && ++stereo_frames <= 3)
         fprintf(stderr,"[vision-view] Stereo pair #%u rendered: session=%llu pose=%llu diagnostic=%d head_aim=%d; physical gameplay unverified\n",
@@ -316,6 +371,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
             session && aim_session == session);
     return marked;
 mono:
+    hide_crosshair(0);
     rendering = 0;
     p2_vision_gl_begin_eye(0);
     return 0;
@@ -424,11 +480,12 @@ static void read_settings(void) {
     static const struct { const char *name; float *value, low, high; } settings[] = {
         {"P2_XR_UNITS_PER_METER",&units_per_meter,10,100},
         {"P2_XR_SNAP_TURN_DEGREES",&snap_degrees,5,180},
-        {"P2_XR_SMOOTH_TURN_DEGREES_PER_SECOND",&smooth_rate,0,720}, // >0 replaces snap
+        {"P2_XR_SMOOTH_TURN_DEGREES_PER_SECOND",&smooth_rate,0,720}, // 0 selects snap
     };
     for (unsigned i = 0; i < sizeof(settings) / sizeof(settings[0]); ++i) {
         value = getenv(settings[i].name);
         int parsed = p2_xr_setting(value,*settings[i].value,settings[i].low,settings[i].high,settings[i].value);
+        if (parsed > 0 && settings[i].value == &snap_degrees) smooth_rate = 0;
         if (parsed) fprintf(stderr,"[vision-view] %s=%s %s: using %.3f\n",settings[i].name,value,
             parsed > 0 ? "accepted" : "rejected (out of range)",*settings[i].value);
     }
@@ -454,6 +511,7 @@ void p2_vision_view_poll(void) {
         if (!replacement) { failed = 1; return; }
         W32(table + 6 * 4, replacement);
         installed = 1;
+        resolve_crosshair_paint(c, client->base);
         fprintf(stderr, "[vision-view] Installed verified Linux RenderView hook at %#x (original %#x), audit=%d diagnostic_stereo=%d; tracked stereo requires a live XR session\n",
             table + 6 * 4, original,enabled,stereo_audit);
         // Pass-through until the tracked controller aims (aim_vision.c).

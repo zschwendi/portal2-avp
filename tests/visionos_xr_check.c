@@ -585,6 +585,51 @@ static void turning_and_settings(void) {
     near(simd_distance(left.origin, right.origin), 0.064f * 43.2f);
     assert(!p2_xr_body_align(&body, &f, (vector_float3){0, 0, 64}, 0, 0));
 }
+static double smooth_turn_for_second(int fps, float x, float rate) {
+    P2XRSmoothTurn state = {0};
+    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 0), 0);
+    double total = 0;
+    for (int frame = 1; frame <= fps; ++frame)
+        total += p2_xr_117_smooth_turn(&state, x, 0, rate, (double)frame / fps);
+    return total;
+}
+static void turning_117(void) {
+    const float rate = P2_XR_117_SMOOTH_RATE;
+    float full = -rate * (1 - 0.12 * (1 - exp(-1 / 0.12)));
+    near(smooth_turn_for_second(90, 1, rate), full);
+    near(smooth_turn_for_second(120, 1, rate), full);
+    near(smooth_turn_for_second(60, 0.6f, rate), full * 0.25f);
+    near(smooth_turn_for_second(90, -1, rate * 0.5f), -full * 0.5f);
+
+    P2XRSmoothTurn state = {0};
+    // First input must be centered, including the vertical axis.
+    near(p2_xr_117_smooth_turn(&state, 0, 0.4f, rate, 1), 0);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.01), 0);
+    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 1.02), 0);
+    near(p2_xr_117_smooth_turn(&state, 0.20f, 0, rate, 1.03), 0);
+    float turn = p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.04);
+    assert(turn < 0 && turn > -1.8f);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.04), 0);
+    assert(p2_xr_117_smooth_turn(&state, -1, 0, rate, 1.05) > 0);
+    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 1.06), 0);
+    assert(state.velocity == 0);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.25), 0);
+    assert(!state.armed);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.26), 0);
+    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 1.27), 0);
+    assert(state.armed);
+    near(p2_xr_117_smooth_turn(&state, NAN, 0, rate, 1.28), 0);
+    assert(!state.armed && !state.has_timestamp);
+
+    P2XRFrame f = frame();
+    P2XRBody body;
+    vector_float3 angles;
+    assert(p2_xr_body_align(&body, &f, (vector_float3){0, 0, 64}, 0, P2_XR_UNITS_PER_METER));
+    assert(p2_xr_body_turn(&body, turn));
+    assert(p2_xr_body_aim(&body, &f, &angles));
+    near(angles.y, turn);
+    near(p2_xr_body_observe(&body, angles.y), 0);
+}
 static void *reader(void *arg) {
     uint64_t session = *(uint64_t *)arg;
     for (int i = 0; i < 10000; ++i) {
@@ -612,9 +657,9 @@ static void concurrent_publication(void) {
 int main(void) {
     invalid_poses();
     views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
-    symmetric_cover(); head_aim_body(); portal_crossing(); turning_and_settings(); controller_aim();
+    symmetric_cover(); head_aim_body(); portal_crossing(); turning_and_settings(); turning_117(); controller_aim();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication, "
-         "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, snap/smooth turn, settings, "
+         "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, snap and 117 smooth turn, settings, "
          "controller portal aim (freshness, hull clamp, head-direction guard, viewmodel pose)");
     return 0;
 }
