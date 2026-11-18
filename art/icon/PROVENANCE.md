@@ -1,33 +1,36 @@
-# Twin Gateways: app icon provenance
+# Porcelain Split Oval: app icon provenance
 
-The Portal 2 native Apple port's app icon, for visionOS (layered) and
-iPad/iPhone. It is an original work, generated entirely by
-`art/icon/generate_icon.swift` from procedural geometry and colour constants
-in that file.
+The Portal 2 native Apple port's app icon, for visionOS (layered), iPad/iPhone
+and macOS. It is an original work, generated entirely by
+`art/icon/generate_icon.swift` from the geometry and colour constants in that
+file. It replaces the earlier "Twin Gateways" artwork (two glowing openings in
+a panel wall); that version stays available in Git history only.
 
 ## Originality statement
 
-- Every shape and colour in the icon is computed by the generator: analytic
-  ellipses, a pinhole-camera projection of a flat panel wall, exponential and
-  Gaussian light falloffs, a seeded pseudo-random starfield, and a hash for
-  panel tone variation.
+- Every shape and colour in the icon is computed by the generator: one analytic
+  ellipse, its exact offset band (the rim stroke), two half-plane cuts, a
+  radial light falloff and Gaussian/erfc soft shadows.
 - No external image, texture, screenshot, model, font, icon set or other
   artwork was read, traced, sampled or used as a reference. The generator
   opens no input files. It imports only Foundation, CoreGraphics, ImageIO,
   UniformTypeIdentifiers and simd, and uses them for maths, PNG encoding and
-  compositing the preview sheet.
+  compositing the preview sheet. It runs `/usr/bin/iconutil` once to pack its
+  own macOS renders.
 - The icon contains no text. The contact sheet has no text either.
 - Nothing was downloaded. The generator runs offline with the Xcode command
   line tools (Swift 6.4.2, macOS 27).
-- This replaces the iOS build's previous icon, which `tools/build_ios.py`
-  extracted at build time from the player's own copy of the game
-  (`portal2/resource/game.icns`). That extraction has been removed.
+- The iOS build's original icon, which `tools/build_ios.py` used to extract from
+  the player's copy of the game (`portal2/resource/game.icns`), was replaced
+  by generated artwork earlier and has not come back.
 
 ### Explicitly excluded
 
 The icon does not use, trace, approximate or evoke any of these:
 
-- the Portal or Portal 2 logo or wordmark, including any stylised letter "O" ring;
+- the Portal or Portal 2 logo or wordmark, or any letterform. The emblem is a
+  plain geometric ellipse split along its axis. It is not drawn to match any
+  logo, and it has no figure, silhouette or lettering inside or around it;
 - the Aperture Science logo, or any iris or shutter-aperture symbol;
 - Valve logos;
 - Chell, the companion cube or its heart, turrets, GLaDOS or Wheatley;
@@ -35,115 +38,130 @@ The icon does not use, trace, approximate or evoke any of these:
 - any in-game screenshot, texture, model or font from the game;
 - any third-party artwork or icon set.
 
-The "Portal-inspired" element is the generic idea of two linked, glowing
-gateways: one cyan, one amber, as recorded in `docs/acceptance.md` (final
-polish: an original icon with blue/orange portals and a test-chamber theme).
-The test-chamber reference is a plain, generic grid of square wall panels. It
-has no signage, markings or game textures. The rims are smooth, analytic light
-profiles, not particle or flame effects.
+The Portal-inspired part is only the generic pairing of a blue half and an
+orange half, as recorded in `docs/acceptance.md` (final polish: an original
+icon with blue/orange portals). That note also mentions a test-chamber theme.
+This simplified design leaves it out on purpose, at the owner's request.
 
 ## Design
 
-Two identical elliptical openings are cut through a clean, softly lit panel
-wall. The wall is seen at an angle, so its seams run toward a vanishing point
-off to the right. The near opening is cyan, at lower left. The far opening is
-amber, at upper right, and looks smaller and narrower because it is farther
-away. That staggered placement keeps the pair from reading like a face at
-small sizes. Through both openings you see a deep night field: navy fading to
-black, faint wisps and sparse stars. Far inside each opening is a faint glow
-in the other opening's colour, a quiet hint that the two are linked. Each rim
-has a white-hot core line, a saturated colour band and a soft halo. The halo
-spills coloured light onto the wall and into the opening as haze.
+A porcelain-white field holds one large oval that leans slightly to the right
+at the top. The oval is drawn as two open rim strokes: a deep cobalt half on
+the left and a saturated warm amber half on the right. The split runs along the
+major axis, so a narrow seam of porcelain separates the halves at the top and
+bottom ends. The silhouettes are bold and high in contrast, so they stay
+legible in a small circle. Dimension is kept subtle: each rim has a softly
+rounded cross-section lit from the upper left, with a faint glaze highlight.
+The porcelain has a gentle key-light falloff and a very faint ambient relief
+around the oval. There are no starfields, holes, panel seams, reflections,
+logos, text or other decoration.
 
-The visionOS layers are arranged for parallax:
+The visionOS layers are independent and arranged for parallax:
 
 | Layer | Content | Alpha |
 |---|---|---|
-| Back | Deep field seen through the openings (gradient, wisps, stars, far glows) | opaque (RGB) |
-| Middle | Panel wall with the two openings cut out, light spill, distance haze | transparent openings |
-| Front | Luminous rims, outer halo, inner haze | transparent except the light |
+| Back | Porcelain field, key-light falloff, faint shared relief under the whole oval | opaque (RGB) |
+| Middle | Cobalt left half rim | transparent except the stroke |
+| Front | Amber right half rim | transparent except the stroke |
 
-When the system shifts the layers, the deep field slides behind the openings
-like a real hole in a wall, and the rims float just above the wall. The iOS
-icon is the same three layers flattened with sRGB source-over, the same
-compositing the system uses, and saved opaque.
+visionOS draws its own shadows between layers, so the colour layers carry none.
+The 32 px seams leave room for the halves to shift against each other: the
+contact sheet's preview moves Front 8 px relative to Middle, which still leaves
+24 px of porcelain in each seam.
+
+The **iPad/iPhone** icon is the same stack flattened with sRGB source-over (the
+same compositing the system uses). A soft contact shadow (16 %, σ 9 px, offset
+(3, 7)) goes under the halves. It is saved as an opaque 1024 px square with no
+baked corner mask; the system applies the mask.
+
+The **macOS** icon renders the same stack natively (not by resampling) into an
+824 px rounded square, corner radius 185.4 px, with 100 px transparent padding
+on the 1024 canvas. A modest drop shadow sits in the padding (24 %, σ 8 px,
+6 px down). Each size from 16 px to 1024 px is rendered at its own resolution
+with an analytic, supersampled mask, so the edges stay crisp. `iconutil` packs
+them into `art/icon/Portal2.icns`.
 
 ## Method
 
-- **Camera and wall.** A pinhole camera (focal length 1000 px, principal
-  point (512, 470)) looks at a vertical wall turned 30° about the vertical
-  axis. Each sample is ray-cast to the wall to find its wall coordinates
-  (u, v) and depth.
-- **Openings.** Each opening is defined on the wall as an ellipse (wall units).
-  Its exact screen-space ellipse is found by transforming the conic through
-  the camera homography (C' = H^-T C H^-1). The wall mask uses the wall-space
-  test, and the rim glow uses the screen-space ellipse, so they line up exactly.
-- **Wall shading.** Albedo, then per-panel tone jitter from an integer hash,
-  seams (a Gaussian core plus a soft ambient-occlusion falloff), a small
-  bevel highlight on each panel's top edge and a shadow on its bottom edge, a
-  Gaussian key-light pool at the upper left, a gentle top-to-bottom gradient,
-  coloured spill from each opening (an exponential in ellipse radii), and
-  exponential distance haze.
-- **Rims.** These use the approximate signed distance to the screen ellipse,
-  scaled by depth: core `exp(-(d/3.3)^2)`, band `exp(-(d/13)^2)`, outer halo
-  `0.50 e^(-d/30) + 0.20 e^(-d/125)` and inner haze
-  `0.55 e^(d/34) + 0.12 e^(d/115)`. A three-harmonic angular shimmer
-  modulates the band (`1 + 0.16 sin 3φ + 0.09 sin 5φ + 0.05 sin 9φ`, with
-  per-portal phases). Weights: core 1.9, band 1.45 × shimmer, halo
-  0.85 + 0.15 × shimmer. Emitted
-  light is converted to an over-layer with alpha = max channel.
-- **Deep field.** A radial gradient, five rotated anisotropic Gaussian wisps,
-  and a faint far glow per opening in the linked colour (0.08 and 0.05 at
-  σ = 80 and 190 px over depth, offset toward the vanishing point). Stars
-  come from 230 splatted Gaussians from a seeded LCG (Knuth MMIX constants,
-  seed `0x5EED2B1C0DE5`), with brightness `0.12 + 1.6 m^7`.
-- **Sampling.** Supersampled at 2×2 (Back), 4×4 (Middle) and 3×3 (Front).
-  Lighting is computed in linear light and encoded to 8-bit sRGB. The opaque
-  outputs get a ±0.5 LSB triangular hash dither against banding.
-- **Determinism.** No clocks or system randomness affect pixels. Two
-  consecutive runs produced byte-identical PNG, JSON and SVG files.
+- **Oval frame.** A sample point is rotated into the oval's frame (centre
+  (512, 512), tilt 16°: the top of the major axis leans right). Its closest
+  point on the ellipse (semi-axes 204 × 334 px, the stroke centreline) is
+  found with four fixed-point iterations on the evolute. That gives an exact
+  signed distance and the outward normal.
+- **Halves.** Each half is the band |d| ≤ stroke/2 (88 px stroke), intersected
+  with its side of the major axis, minus half the seam (32 px gap in total).
+  The four cut corners are rounded with an 8 px radius-rounded intersection of
+  signed distance fields. Coverage is analytic (`clamp(0.5 − sdf/footprint)`)
+  at every supersample, which keeps the edges crisp at every size.
+- **Rim shading.** The cross-section is tilted by up to `bevel` = 0.60 at the
+  rim edges. Lambert lighting relative to a flat face (light direction
+  (−0.42, −0.58, 0.70)) mixes the half's `base` colour toward `deep` (gain 0.9)
+  or `lit` (gain 1.6). A Blinn glaze highlight (white, strength 0.30,
+  exponent 60) is added on top.
+- **Porcelain.** A radial blend from `lit` to `base` to `edge` around a key light
+  at (400, 330), radius 820 px. The relief multiplies the field by
+  `1 − 0.05 exp(−out²/2·28²)`, where `out` is the distance outside the full rim
+  band, offset (4, 9) px. Set `Field.reliefStrength` to 0 to remove it.
+- **Sampling.** Supersampled at 4×4 (Middle, Front, mask), 3×3 (Back) and 2×2
+  (shadows). macOS sizes of 64 px and below use 6×6. Shading is computed in
+  linear light and encoded to 8-bit sRGB. Opaque outputs get a ±0.5 LSB
+  triangular hash dither against banding.
+- **Determinism.** No clocks or randomness affect any pixel.
 
-All named parameters are constants at the top of `generate_icon.swift`. The
-generator also writes them, with the derived screen-space ellipses, to
-`art/icon/parameters.json`. `art/icon/twin-gateways.svg` is a vector reference
-of the same geometry (seams, ellipses, gradients, blurred rim strokes) for
-review. The shipped PNGs are the per-pixel renders.
+All parameters are constants near the top of `generate_icon.swift`, grouped by
+layer: `Field` (Back), `Emblem` (shared oval geometry and light), `Glaze`,
+`halves` (per-half layer, side, colours and preview shift), `FlatShadow` and
+`Mac`. Each layer's geometry and colours can be adjusted independently there.
+The generator writes them, with the derived outer extent, to
+`art/icon/parameters.json`. `art/icon/split-oval.svg` is an editable vector
+reference of the same stack, with one group per visionOS layer and exact
+stroked ellipses clipped at the seams. It omits the shading, rounded cut
+corners, relief and contact shadow. The shipped PNGs are the per-pixel renders.
 
 ### Key parameters (see `parameters.json` for the full set)
 
 | Group | Values |
 |---|---|
 | Canvas | 1024 × 1024 px |
-| Camera | focal 1000 px, wall yaw 30°, distance 1, principal (512, 470) |
-| Wall | square panels 0.25, seam 0.0034, albedo `#D3DAE3`, ambient `#F2F5FA`, haze `#161D2C`, key light at (−0.62, 0.42), radius 0.70 |
-| Cyan opening | wall centre (−0.215, −0.100), semi-axes (0.130, 0.215); rim `#2CC6FF`, glow `#1690FF`, core `#E9FBFF`, far light `#FFA24A` |
-| Amber opening | wall centre (0.370, 0.060), semi-axes (0.130, 0.215); rim `#FFA11F`, glow `#FF5A0A`, core `#FFF6E6`, far light `#45C8FF` |
-| Screen ellipses (derived) | cyan centre (293.0, 582.6), radii 142.0 × 241.8; amber centre (778.0, 419.2), radii 80.4 × 181.7 |
-| Deep field | `#0D1F4C` to `#02040C`, centre (560, 470), radius 760 px; 230 stars |
+| Oval | centre (512, 512), semi-axes 204 × 334 px, tilt 16°, stroke 88 px, seam 32 px, corner radius 8 px; outer extent 378 px from the centre (visionOS circle radius 512) |
+| Cobalt half (Middle) | base `#1646C4`, deep `#0A2675`, lit `#4A80F0` |
+| Amber half (Front) | base `#F7860F`, deep `#C24C06`, lit `#FFB54A` |
+| Porcelain (Back) | lit `#FCFBF8`, base `#F1EFEA`, edge `#DCD9D3`; relief 0.05, σ 28 px |
+| Preview parallax | Back −6, Middle +4, Front +12 px per unit of look |
 
 ## Outputs and wiring
 
 | Output | Used by |
 |---|---|
 | `visionos/GameAssets.xcassets/AppIcon.solidimagestack/{Back,Middle,Front}.solidimagestacklayer/Content.imageset/*.png` | Portal2Game target only (`visionos/project.yml`: source `GameAssets.xcassets`, `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`) |
-| `ios/Assets.xcassets/AppIcon.appiconset/AppIcon.png` | `tools/build_ios.py` (`app_icon`): `xcrun actool` compiles it into `Portal2.app` and the partial plist's `CFBundleIcons` / `CFBundleIcons~ipad` go into `Info.plist`. If actool is unavailable, it falls back to loose PNGs made with `sips` |
-| `art/icon/twin-gateways.svg`, `art/icon/parameters.json` | review and audit |
+| `ios/Assets.xcassets/AppIcon.appiconset/AppIcon.png` | `tools/build_ios.py` (`app_icon`): `xcrun actool` compiles it into `Portal2.app`, and the partial plist's `CFBundleIcons` / `CFBundleIcons~ipad` go into `Info.plist`. If actool is unavailable, it falls back to loose PNGs made with `sips` |
+| `art/icon/Portal2.icns` | macOS packaging input |
+| `art/icon/split-oval.svg`, `art/icon/parameters.json` | review and audit |
+| `build/porcelain-icon/Portal2.iconset/` (not versioned) | iconutil input |
 | `build/icon-preview/contact-sheet.png` (not versioned) | owner preview |
+
+The generator writes only the files above. It does not touch the asset
+catalogs' `Contents.json` files; it checks that they exist and stops otherwise.
 
 The contact sheet layout:
 
-- Top left: the iOS squircle at 1024 px, over a split light and dark backdrop.
-- Top right: the visionOS circular mask at 520 px.
-- Middle right: the Back, Middle and Front layers. Middle and Front are shown over a checkerboard.
-- Lower right: simulated parallax (look left, rest, look right).
-- Bottom: two strips, light then dark. Each shows the squircle and then the circle at 180, 120, 87, 60, 40 and 29 px, at 1:1 pixels.
+- Top: heroes over split light and dark grounds. From left: the iPad squircle,
+  the visionOS circle and the macOS rounded square (with its own padding and
+  shadow), each 620 px.
+- Middle: the Back, Middle and Front layers (Middle and Front over a
+  checkerboard). Next to them, simulated parallax in the circle: look left,
+  up, rest, down, right.
+- Bottom: two strips, light then dark. Each shows squircles and then circles at
+  180, 120, 87, 60, 40 and 29 px, then native macOS renders at 128, 64, 32 and
+  16 px, all at 1:1 pixels.
 
 ## Regenerate
 
-From the repository root (no network; takes about 4 s):
+From the repository root (no network; takes about 3 s):
 
 ```sh
-xcrun swiftc -O art/icon/generate_icon.swift -o "${TMPDIR:-/tmp}/p2-icongen" && "${TMPDIR:-/tmp}/p2-icongen"
+xcrun swift -O art/icon/generate_icon.swift
+# or compiled: xcrun swiftc -O art/icon/generate_icon.swift -o "${TMPDIR:-/tmp}/p2-icongen" && "${TMPDIR:-/tmp}/p2-icongen"
 # add --no-preview to skip build/icon-preview/contact-sheet.png
 python3 -m unittest tests.test_app_icon
 ```

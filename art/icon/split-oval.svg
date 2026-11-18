@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<!-- Porcelain Split Oval: vector reference of the layer stack, written by art/icon/generate_icon.swift.
+     Original geometry only: a porcelain field and one tilted oval drawn as two open rim strokes,
+     split along the major axis with a seam at each end. Each group is one visionOS layer.
+     The shipped PNGs are per-pixel renders; their glaze shading, rounded cut corners, faint relief
+     and the flattened icons' contact shadow are not drawn here. -->
+<defs>
+  <radialGradient id="porcelain" cx="400.00" cy="330.00" r="1107.00" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#FCFBF8"/><stop offset="0.44" stop-color="#F1EFEA"/><stop offset="1" stop-color="#DCD9D3"/>
+  </radialGradient>
+  <clipPath id="left-of-seam"><rect x="-600.00" y="-600.00" width="584.00" height="1200.00"/></clipPath>
+  <clipPath id="right-of-seam"><rect x="16.00" y="-600.00" width="584.00" height="1200.00"/></clipPath>
+</defs>
+<g id="Back"><rect width="1024" height="1024" fill="url(#porcelain)"/></g>
+<g id="Middle" transform="translate(512.00 512.00) rotate(16.00)">
+  <ellipse id="blue-half" rx="204.00" ry="334.00" fill="none" stroke-width="88.00" stroke="#1646C4" clip-path="url(#left-of-seam)"/>
+</g>
+<g id="Front" transform="translate(512.00 512.00) rotate(16.00)">
+  <ellipse id="orange-half" rx="204.00" ry="334.00" fill="none" stroke-width="88.00" stroke="#F7860F" clip-path="url(#right-of-seam)"/>
+</g>
+</svg>

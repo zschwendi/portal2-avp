@@ -1,21 +1,16 @@
 {
   "generator" : "art/icon/generate_icon.swift",
+  "design" : "Porcelain Split Oval",
   "canvas_px" : 1024,
-  "camera" : { "focal_px" : 1000.00, "wall_yaw_deg" : 30.00, "distance" : 1.00, "principal_px" : [512.0, 470.0] },
-  "wall" : { "panel" : 0.2500, "grid_origin" : [0.0775, -0.0900], "seam_width" : 0.0034, "albedo" : "#D3DAE3", "ambient" : "#F2F5FA", "fog" : "#161D2C", "key_light_uv" : [-0.6200, 0.4200], "key_radius" : 0.700, "tone_jitter" : 0.070 },
-  "deep_field" : { "inner" : "#0D1F4C", "outer" : "#02040C", "centre_px" : [560.0, 470.0], "radius_px" : 760.0, "star_seed" : "0x5EED2B1C0DE5", "star_count" : 230,
-    "wisps" : [
-      { "centre_px" : [300.0, 430.0], "sigma_px" : [150.0, 60.0], "rotation_deg" : -28.0, "colour" : "#2C3C9E", "intensity" : 0.120 },
-      { "centre_px" : [380.0, 640.0], "sigma_px" : [170.0, 70.0], "rotation_deg" : 18.0, "colour" : "#16708F", "intensity" : 0.110 },
-      { "centre_px" : [760.0, 420.0], "sigma_px" : [120.0, 50.0], "rotation_deg" : 35.0, "colour" : "#0F5E86", "intensity" : 0.120 },
-      { "centre_px" : [820.0, 600.0], "sigma_px" : [140.0, 55.0], "rotation_deg" : -15.0, "colour" : "#3A2E86", "intensity" : 0.080 },
-      { "centre_px" : [560.0, 300.0], "sigma_px" : [260.0, 80.0], "rotation_deg" : 8.0, "colour" : "#23307A", "intensity" : 0.090 }
-    ] },
-  "light" : { "core_width_px" : 3.30, "band_width_px" : 13.00, "halo_px" : [30.00, 125.00], "haze_px" : [34.00, 115.00], "spill_radii" : [0.36, 1.10], "spill_strength" : 1.00 },
-  "portals" : [
-    { "name" : "cyan", "wall_centre" : [-0.2150, -0.1000], "wall_semi_axes" : [0.1300, 0.2150], "rim" : "#2CC6FF", "glow" : "#1690FF", "core" : "#E9FBFF", "beyond" : "#FFA24A", "shimmer_phase" : 0.350,
-      "screen" : { "centre_px" : [293.03, 582.64], "radii_px" : [141.97, 241.75], "rotation_deg" : 1.745, "depth" : 0.8925 } },
-    { "name" : "amber", "wall_centre" : [0.3700, 0.0600], "wall_semi_axes" : [0.1300, 0.2150], "rim" : "#FFA11F", "glow" : "#FF5A0A", "core" : "#FFF6E6", "beyond" : "#45C8FF", "shimmer_phase" : 2.100,
-      "screen" : { "centre_px" : [777.99, 419.21], "radii_px" : [80.40, 181.73], "rotation_deg" : -0.483, "depth" : 1.1850 } }
-  ]
+  "back" : { "layer" : "Back", "lit" : "#FCFBF8", "base" : "#F1EFEA", "edge" : "#DCD9D3", "light_centre_px" : [400.0, 330.0], "light_radius_px" : 820.0,
+    "relief" : { "strength" : 0.050, "sigma_px" : 28.0, "offset_px" : [4.0, 9.0] }, "preview_shift_px" : -6.0 },
+  "emblem" : { "centre_px" : [512.0, 512.0], "semi_axes_px" : [204.0, 334.0], "tilt_deg" : 16.0, "stroke_px" : 88.0, "seam_px" : 32.0, "corner_radius_px" : 8.0,
+    "bevel" : 0.600, "light_dir" : [-0.4194, -0.5792, 0.6990], "outer_extent_px" : 378.0 },
+  "glaze" : { "colour" : "#FFFFFF", "strength" : 0.300, "exponent" : 60.0 },
+  "halves" : [
+    { "name" : "blue", "layer" : "Middle", "side" : "left", "base" : "#1646C4", "deep" : "#0A2675", "lit" : "#4A80F0", "preview_shift_px" : 4.0 },
+    { "name" : "orange", "layer" : "Front", "side" : "right", "base" : "#F7860F", "deep" : "#C24C06", "lit" : "#FFB54A", "preview_shift_px" : 12.0 }
+  ],
+  "flat_contact_shadow" : { "colour" : "#3A332B", "strength" : 0.160, "sigma_px" : 9.0, "offset_px" : [3.0, 7.0] },
+  "macos" : { "icns" : "art/icon/Portal2.icns", "inset_px" : 100.0, "corner_radius_px" : 185.4, "shadow_opacity" : 0.240, "shadow_sigma_px" : 8.0, "shadow_offset_px" : 6.0, "sizes_px" : [16, 32, 64, 128, 256, 512, 1024] }
 }

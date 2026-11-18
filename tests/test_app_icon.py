@@ -1,7 +1,8 @@
 """Original app icon: generated catalogs, layer formats and build wiring.
 
 Checks the committed output of art/icon/generate_icon.swift (dimensions and
-colour type read from the PNG headers, asset catalog references), the visionOS
+colour type read from the PNG headers, asset catalog references, the split oval's
+recorded geometry and where its halves land in the decoded PNGs), the visionOS
 project wiring and tools/build_ios.py's partial-plist merge. No Xcode needed.
 """
 import json
@@ -12,6 +13,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -27,6 +29,35 @@ def png_header(path):
     data = path.read_bytes()[:33]
     assert data[:8] == b'\x89PNG\r\n\x1a\n' and data[12:16] == b'IHDR', path
     return struct.unpack('>IIBB', data[16:26])
+
+
+def png_pixels(path):
+    """pixel(x, y) -> RGBA tuple for an 8-bit, non-interlaced RGB or RGBA PNG."""
+    data, pos, idat = path.read_bytes(), 8, b''
+    width, height, depth, colour_type = png_header(path)
+    assert depth == 8 and colour_type in (RGB, RGBA) and data[28] == 0, path
+    while pos < len(data):
+        length, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        if kind == b'IDAT':
+            idat += data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+    raw, bpp = zlib.decompress(idat), 3 if colour_type == RGB else 4
+    stride, rows, prev = width * bpp, [], bytearray(width * bpp)
+    for y in range(height):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a, b = line[i - bpp] if i >= bpp else 0, prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1: line[i] = (line[i] + a) & 255
+            elif kind == 2: line[i] = (line[i] + b) & 255
+            elif kind == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(line)
+        prev = line
+    return lambda x, y: tuple(rows[y][x * bpp:(x + 1) * bpp]) + ((255,) if bpp == 3 else ())
 
 
 class GeneratedIconTests(unittest.TestCase):
@@ -51,18 +82,40 @@ class GeneratedIconTests(unittest.TestCase):
                 listed = json.loads((png.parent / 'Contents.json').read_text())['images']
                 self.assertIn(png.name, [image.get('filename') for image in listed], png)
 
-    def test_parameters_record_both_gateways(self):
+    def test_split_oval_fits_the_circle_and_keeps_its_seams_under_parallax(self):
         params = json.loads((ROOT / 'art/icon/parameters.json').read_text())
-        self.assertEqual([p['name'] for p in params['portals']], ['cyan', 'amber'])
-        for portal in params['portals']:
-            cx, cy = portal['screen']['centre_px']
-            rx, ry = portal['screen']['radii_px']
-            a = math.radians(portal['screen']['rotation_deg'])
-            outline = [(cx + rx * math.cos(t) * math.cos(a) - ry * math.sin(t) * math.sin(a),
-                        cy + rx * math.cos(t) * math.sin(a) + ry * math.sin(t) * math.cos(a))
-                       for t in (i * math.pi / 180 for i in range(360))]
-            # Rim well inside the visionOS circular mask (radius 512), leaving room for the glow.
-            self.assertLess(max(math.dist(p, (512, 512)) for p in outline), 420, portal['name'])
+        self.assertEqual([(h['name'], h['layer'], h['side']) for h in params['halves']],
+                         [('blue', 'Middle', 'left'), ('orange', 'Front', 'right')])
+        oval = params['emblem']
+        shifts = [params['back']['preview_shift_px']] + [h['preview_shift_px'] for h in params['halves']]
+        # The stroke's outer edge peaks at the major-axis ends: well inside the visionOS circle (radius 512)
+        # even at the largest preview parallax shift.
+        extent = math.dist(oval['centre_px'], (512, 512)) + oval['semi_axes_px'][1] + oval['stroke_px'] / 2
+        self.assertAlmostEqual(oval['outer_extent_px'], extent, places=1)
+        self.assertLess(extent + max(map(abs, shifts)), 420)
+        # The two halves shift against each other by at most this much; the seams stay clearly open.
+        self.assertGreaterEqual(oval['seam_px'] - abs(shifts[2] - shifts[1]), 16)
+
+    def test_rendered_halves_sit_on_their_own_layers(self):
+        oval = json.loads((ROOT / 'art/icon/parameters.json').read_text())['emblem']
+        (cx, cy), (rx, ry) = oval['centre_px'], oval['semi_axes_px']
+        c, s = math.cos(math.radians(oval['tilt_deg'])), math.sin(math.radians(oval['tilt_deg']))
+        at = lambda x, y: (round(cx + x * c - y * s), round(cy + x * s + y * c))  # oval frame -> pixel
+        layer = lambda name: STACK / f'{name}.solidimagestacklayer/Content.imageset/{name}.png'
+        middle, front, back = png_pixels(layer('Middle')), png_pixels(layer('Front')), png_pixels(layer('Back'))
+        flat = png_pixels(IOS_SET / 'AppIcon.png')
+        blue, orange = at(-rx, 0), at(rx, 0)
+        self.assertEqual((middle(*blue)[3], front(*blue)[3]), (255, 0))
+        self.assertEqual((middle(*orange)[3], front(*orange)[3]), (0, 255))
+        r, g, b = flat(*blue)[:3]
+        self.assertGreater(b, r + 100)
+        r, g, b = flat(*orange)[:3]
+        self.assertGreater(r, b + 100)
+        for seam in (at(0, -ry), at(0, ry)):  # open seams: clear on both colour layers, porcelain beneath
+            self.assertEqual((middle(*seam)[3], front(*seam)[3]), (0, 0), seam)
+            self.assertGreater(min(back(*seam)[:3]), 200, seam)
+        for corner in ((0, 0), (1023, 0), (0, 1023), (1023, 1023), (512, 512)):
+            self.assertEqual((middle(*corner)[3], front(*corner)[3]), (0, 0), corner)
 
 
 class IconWiringTests(unittest.TestCase):
