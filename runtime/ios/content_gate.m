@@ -172,7 +172,8 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     __weak P2ContentGateController *weak = self;
     _button = [UIButton buttonWithConfiguration:configuration primaryAction:
         [UIAction actionWithHandler:^(__kindof UIAction *action) { (void)action; [weak checkAgain]; }]];
-    [_button setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [_button setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+    [_button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[_button, _status]];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
@@ -205,8 +206,8 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
     }
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    NSLayoutConstraint *width = [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-64];
-    width.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *width = [stack.widthAnchor constraintEqualToConstant:720];
+    width.priority = UILayoutPriorityRequired - 1;
     [NSLayoutConstraint activateConstraints:@[
         [scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
@@ -214,8 +215,9 @@ static NSString *count_text(int count) {  // « 3 592 », « 3,592 »
         [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:32],
         [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-32],
-        [stack.centerXAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor],
-        [stack.widthAnchor constraintLessThanOrEqualToConstant:720],
+        [scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
+        [stack.centerXAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.centerXAnchor],
+        [stack.widthAnchor constraintLessThanOrEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-64],
         width,
     ]];
     [self render];
