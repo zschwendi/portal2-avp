@@ -18,6 +18,9 @@ struct PortalGameView: View {
     @State private var windowToken = UUID()
     @State private var aspect = 16.0 / 9.0
     @StateObject private var importer = PortalContentImporter()
+    private let saveSession = PortalCloudSaves.mobile
+    @State private var savePlayRequest = 0
+    @State private var preparingSaves = false
     @State private var engine = p2_vision_game_state()
     @State private var importing = false
     @State private var importTask: Task<Void, Never>?
@@ -123,7 +126,11 @@ struct PortalGameView: View {
                           importing: importing, checking: checking, play: { Task { await play() } },
                           resume: resume, checkAgain: { Task { await refresh("check-again", start: false) } },
                           startImport: startImport, cancelImport: { importTask?.cancel() },
-                          dismissMessage: { notice = nil }, sheet: $sheet)
+                          dismissMessage: { notice = nil }, saveSession: saveSession,
+                          canUseSaveControls: engine != 1 && engine != 2 && !starting && !checking,
+                          playOffline: preparingSaves && saveSession.cloudConfigured
+                            ? { Task { await startFromLocalSaves() } } : nil,
+                          sheet: $sheet)
     }
 
     private var cardState: PortalCardState {
@@ -152,6 +159,20 @@ struct PortalGameView: View {
         guard abiMatches else { notice = "This build needs its native libraries rebuilt."; return }
         starting = true
         await refresh("play", start: true)
+        if !checking { starting = false }
+    }
+
+    @MainActor private func startFromLocalSaves() async {
+        guard preparingSaves, let saves = saveSession.controller else { return }
+        savePlayRequest += 1
+        preparingSaves = false
+        guard saves.playOffline() else {
+            checking = false
+            starting = false
+            notice = saves.status
+            return
+        }
+        await startCheckedContent("play")
         starting = false
     }
 
@@ -214,15 +235,44 @@ struct PortalGameView: View {
     @MainActor private func refresh(_ trigger: String, start: Bool) async {
         guard !checking, !importing else { return }
         checking = true
-        let result = await PortalContentSetup.check(trigger, start: start)
+        guard start else {
+            setup = await PortalContentSetup.check(trigger, start: false)
+            checking = false
+            engine = p2_vision_game_state()
+            return
+        }
+        guard let saves = saveSession.controller else {
+            notice = saveSession.layoutIssue
+            await startCheckedContent(trigger)
+            return
+        }
+        savePlayRequest += 1
+        let request = savePlayRequest
+        preparingSaves = true
+        let ready = await saves.prepareForPlay()
+        guard savePlayRequest == request else { return }
+        preparingSaves = false
+        guard ready, !Task.isCancelled else {
+            if ready { saves.gameplayDidEnd() }
+            checking = false
+            notice = saves.status
+            return
+        }
+        await startCheckedContent(trigger)
+    }
+
+    @MainActor private func startCheckedContent(_ trigger: String) async {
+        let result = await PortalContentSetup.check(trigger, start: true)
         checking = false
         engine = p2_vision_game_state()
         if let result {
+            saveSession.controller?.gameplayDidEnd()
             setup = result
-            if start && !result.complete { sheet = .importFiles }
+            if !result.complete { sheet = .importFiles }
             return
         }
-        // Started (or already running/returned): the content passed the gate.
+        // rt_destroy may leave native workers alive. After a launch attempt
+        // succeeds, retain ownership for the rest of this process.
         setup?.complete = true
         if engine == 2 { notice = PortalContentSetup.stopped }
     }

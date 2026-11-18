@@ -38,5 +38,7 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Import your Portal 2 game files from your Mac.</string>
+	<key>Portal2CloudContainer</key>
+	<string>$(P2_ICLOUD_CONTAINER)</string>
 </dict>
 </plist>

@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ios_bundle_id import bundle_id
+from portal_cloud_signing import CONTAINER, INFO_KEY
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_game
@@ -40,6 +41,8 @@ TARGETS = {
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--target', choices=sorted(TARGETS), default='sim')
+    ap.add_argument('--icloud-saves', action='store_true',
+                    help='enable the shared iCloud Documents container in a provisioned device build')
     ap.add_argument('--opt', default='1', choices=['0', '1', '2', '3'])
     ap.add_argument('--fast-memory', action='store_true', help='-DRT_FAST_MEMORY (voir docs/fast-path.md)')
     ap.add_argument('--release', action='store_true',
@@ -48,6 +51,8 @@ def main():
     ap.add_argument('--layout', type=Path, default=Path('build/game/prep/layout.json'))
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     args = ap.parse_args()
+    if args.icloud_saves and args.target != 'device':
+        ap.error('--icloud-saves requires a provisioned device build')
     if args.release:
         args.opt, args.fast_memory = '2', True
     os.chdir(ROOT)
@@ -86,8 +91,10 @@ def main():
     app.mkdir(parents=True, exist_ok=True)
     response = Path(f'build/ios/{args.target}/link.rsp')
     response.write_text('\n'.join(str(o) for o in objects) + '\n')
+    swift_support = compile_save_launcher(target, sdk, response.parent / 'PortalSaveLauncher.o')
     libs = [str(deps / 'lib' / n) for n in ('libSDL2main.a', 'libSDL2.a', 'libgl4es.a', 'libfreetype.a')]
-    link = ['clang', *base, f'@{response}', *libs, '-liconv',
+    link = ['clang', *base, f'@{response}', str(response.parent / 'PortalSaveLauncher.o'),
+            *swift_support, *libs, '-liconv',
             *[x for f in FRAMEWORKS for x in ('-framework', f)],
             # Le SDK 27 impose UIScene, que SDL2 ignore : déclarer un SDK 18
             # garde le cycle de vie classique d'UIKit (voir ios/probe).
@@ -98,7 +105,10 @@ def main():
     for key, value in dict(EXECUTABLE='portal2', IDENTIFIER=bundle_id(), NAME='Portal 2',
                            PLATFORM=target['plist']).items():
         plist = plist.replace(f'@{key}@', value)
-    (app / 'Info.plist').write_text(plist)
+    info = plistlib.loads(plist.encode())
+    if args.icloud_saves:
+        info[INFO_KEY] = os.environ.get('P2_ICLOUD_CONTAINER', CONTAINER)
+    (app / 'Info.plist').write_bytes(plistlib.dumps(info))
     # Page du jeu dans l'app Réglages d'iOS (lue par runtime/ios/settings.c).
     shutil.copytree(ROOT / 'ios/Settings.bundle', app / 'Settings.bundle', dirs_exist_ok=True)
     app_icon(app, target['sdk'])
@@ -114,6 +124,18 @@ def main():
         subprocess.run([sys.executable, str(ROOT / 'ios/signing/sign.py'), str(app)], check=True)
     size = (app / 'portal2').stat().st_size
     print(f'{app} : exécutable {size / 1e6:.0f} Mo, {time.time() - started:.0f} s au total')
+
+
+def compile_save_launcher(target, sdk, output):
+    swiftc = Path(subprocess.check_output(
+        ['xcrun', '--sdk', target['sdk'], '-f', 'swiftc'], text=True).strip())
+    sources = sorted((ROOT / 'apple/Saves').glob('*.swift'))
+    subprocess.run([str(swiftc), '-target', target['triple'], '-sdk', sdk, '-swift-version', '6',
+                    '-parse-as-library', '-whole-module-optimization', '-O', '-emit-object',
+                    '-module-name', 'Portal2Saves', *map(str, sources), '-o', str(output)], check=True)
+    toolchain = swiftc.parent.parent / 'lib/swift' / target['sdk']
+    return ['-L', str(Path(sdk) / 'usr/lib/swift'), '-L', str(toolchain),
+            '-Wl,-rpath,/usr/lib/swift']
 
 
 def app_icon(app, platform):

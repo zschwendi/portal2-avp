@@ -12,5 +12,6 @@
 // vérification.
 // resume_save : optionnel, reçoit le nom de la sauvegarde choisie par Continuer.
 void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
-                         const char *documents, int show_launcher, int frame_rate_overridden,
-                         int show_fps_overridden, char resume_save[P2_IOS_SAVE_STEM_SIZE]);
+                         const char *documents, const char *user_dir, int show_launcher,
+                         int frame_rate_overridden, int show_fps_overridden,
+                         char resume_save[P2_IOS_SAVE_STEM_SIZE]);

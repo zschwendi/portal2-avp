@@ -20,12 +20,14 @@ targets:
         com.apple.developer.kernel.increased-memory-limit: true
     sources:
       - path: Sources
+      - path: ../apple/Saves
       - path: Shaders
       # Original layered app icon (art/icon/generate_icon.swift); game target only.
       - path: GameAssets.xcassets
     info:
       path: Game-Info.plist
       properties:
+        Portal2CloudContainer: $(P2_ICLOUD_CONTAINER)
         GCSupportsControllerUserInteraction: true
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad

@@ -4,6 +4,41 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+
+// The Finder launcher's preflight owns this lock before it replaces any save.
+// The runtime keeps ownership until process exit, including after a launcher
+// crash. A direct CLI launch takes its own lease for the same user directory.
+static int retain_save_writer(const char *user) {
+    char path[PATH_MAX];
+    int length = snprintf(path, sizeof(path), "%s/.portal2-save-writer.lock", user);
+    if (length < 0 || (size_t)length >= sizeof(path)) return -1;
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    struct stat lock = {0}, stdin_lock = {0};
+    int okay = fstat(fd, &lock) == 0 && S_ISREG(lock.st_mode) && lock.st_nlink == 1;
+    const char *inherit = getenv("P2_SAVE_WRITER_LEASE_STDIN");
+    if (inherit && !strcmp(inherit, "1")) {
+        okay = okay && fstat(STDIN_FILENO, &stdin_lock) == 0
+            && lock.st_dev == stdin_lock.st_dev && lock.st_ino == stdin_lock.st_ino
+            && flock(STDIN_FILENO, LOCK_EX | LOCK_NB) == 0
+            && fcntl(STDIN_FILENO, F_DUPFD_CLOEXEC, 3) >= 0;
+        close(fd);
+    } else {
+        okay = okay && flock(fd, LOCK_EX | LOCK_NB) == 0;
+        if (!okay) close(fd);
+    }
+    return okay ? 0 : -1;
+}
+#endif
+
 static uint32_t guest_string(const char *value) {
     size_t length = strlen(value) + 1;
     uint32_t address = rt_alloc((uint32_t)length);
@@ -32,6 +67,13 @@ int main(int argc, char **argv) {
         fputs("native runtime initialization failed\n", stderr); return 2;
     }
     if (linux && user && rt_paths_init(game, linux, user)) { perror("game paths"); rt_destroy(); return 2; }
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+    if (linux && user && retain_save_writer(user)) {
+        fputs("Portal 2 save directory is in use; close the other game or save sync and retry.\n", stderr);
+        rt_destroy();
+        return 2;
+    }
+#endif
     if (chdir(game)) { perror(game); rt_destroy(); return 2; }
     CPU cpu; rt_cpu_reset(&cpu); cpu.esp = 0x70800000;
     uint32_t count = (uint32_t)(argc - first + 1), vector = rt_alloc((count + 1) * 4);

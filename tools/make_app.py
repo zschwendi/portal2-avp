@@ -12,6 +12,7 @@ journal dans ~/Library/Logs/Portal2Natif.log. Le lanceur terminal reste tools/ru
 """
 import argparse
 import json
+import os
 import platform
 import plistlib
 import shlex
@@ -21,11 +22,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from portal_cloud_signing import CONTAINER, INFO_KEY, authorize_cloud
+
 ROOT = Path(__file__).resolve().parent.parent
 NAME = 'Portal 2 Natif'
 # Sans -w/-h/-windowed : résolution et mode choisis dans le menu Vidéo du jeu
 # (enregistrés dans update/cfg/video.txt) ; Retina selon la résolution.
 DEFAULT_ARGS = ['-game', 'portal2', '-novid']
+DEFAULT_BUNDLE_ID = 'fr.kanapitsas.portal2-native'
 
 LAUNCHER = '''#!/bin/bash
 # Worker de lancement produit par tools/make_app.py.
@@ -54,8 +58,14 @@ exec {binary} --images {images} --game-dir {game_dir} --linux-root {linux_root} 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dest', type=Path, default=Path.home() / 'Applications')
+    parser.add_argument('--bundle-id', default=DEFAULT_BUNDLE_ID)
+    parser.add_argument('--cloud-signing-identity', help='Developer ID Application signing identity')
+    parser.add_argument('--cloud-provisioning-profile', type=Path,
+                        help='macOS App ID profile authorizing the Portal 2 iCloud Documents container')
     parser.add_argument('game_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if bool(args.cloud_signing_identity) != bool(args.cloud_provisioning_profile):
+        parser.error('Provide both cloud signing identity and provisioning profile.')
     game_args = args.game_args[1:] if args.game_args[:1] == ['--'] else args.game_args
     config = json.loads((ROOT / 'config/local.json').read_text())
     binary = ROOT / 'build/portal2-native'
@@ -69,7 +79,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='.portal2-launcher-', dir=args.dest) as temporary:
         staging = Path(temporary)
         staged_app = staging / app.name
-        build_bundle(staged_app, paths, game_args or DEFAULT_ARGS)
+        build_bundle(staged_app, paths, game_args or DEFAULT_ARGS, bundle_id=args.bundle_id,
+                     cloud_identity=args.cloud_signing_identity, cloud_profile=args.cloud_provisioning_profile)
         # Conserver le précédent paquet tant que la nouvelle version ne compile pas.
         previous = staging / 'previous.app'
         if app.exists() or app.is_symlink():
@@ -83,7 +94,8 @@ def main():
     print(app)
 
 
-def build_bundle(app, paths, game_args):
+def build_bundle(app, paths, game_args, *, bundle_id=DEFAULT_BUNDLE_ID,
+                 cloud_identity=None, cloud_profile=None):
     macos = app / 'Contents/MacOS'
     resources = app / 'Contents/Resources'
     macos.mkdir(parents=True)
@@ -103,8 +115,10 @@ def build_bundle(app, paths, game_args):
 
     subprocess.run([
         'xcrun', '--sdk', 'macosx', 'swiftc', '-O', '-parse-as-library',
-        '-target', f'{platform.machine()}-apple-macos13.0',
-        str(ROOT / 'macos/Portal2Launcher.swift'), '-o', str(macos / 'launcher'),
+        '-target', f'{platform.machine()}-apple-macos13.0', '-swift-version', '6',
+        str(ROOT / 'macos/Portal2Launcher.swift'), str(ROOT / 'macos/PortalSaveWriterLease.swift'),
+        *map(str, sorted((ROOT / 'apple/Saves').glob('*.swift'))),
+        '-o', str(macos / 'launcher'),
     ], check=True)
 
     icon = ROOT / 'art/icon/Portal2.icns'
@@ -112,13 +126,37 @@ def build_bundle(app, paths, game_args):
         icon = paths['game_dir'] / 'portal2/resource/game.icns'
     if icon.exists(): shutil.copy(icon, resources / 'portal2.icns')
     plist = {
-        'CFBundleName': NAME, 'CFBundleDisplayName': NAME, 'CFBundleIdentifier': 'fr.kanapitsas.portal2-native',
+        'CFBundleName': NAME, 'CFBundleDisplayName': NAME, 'CFBundleIdentifier': bundle_id,
         'CFBundleExecutable': 'launcher', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
         'CFBundleShortVersionString': '1.0', 'CFBundleIconFile': 'portal2', 'LSMinimumSystemVersion': '13.0',
         'NSHighResolutionCapable': True, 'LSApplicationCategoryType': 'public.app-category.games',
     }
-    with (app / 'Contents/Info.plist').open('wb') as f: plistlib.dump(plist, f)
-    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(app)], check=True)
+    entitlements = None
+    if cloud_profile:
+        contents = subprocess.check_output(['security', 'cms', '-D', '-i', str(cloud_profile)])
+        profile = plistlib.loads(contents)
+        team = profile['TeamIdentifier'][0]
+        app_id = profile['Entitlements'].get('com.apple.application-identifier', '')
+        if app_id != f'{team}.{bundle_id}':
+            raise ValueError(f'Provisioning profile must authorize {team}.{bundle_id}')
+        container = os.environ.get('P2_ICLOUD_CONTAINER', CONTAINER)
+        entitlements = authorize_cloud(profile['Entitlements'], container)
+        entitlements.update({'com.apple.application-identifier': app_id,
+                             'com.apple.developer.team-identifier': team})
+        plist[INFO_KEY] = container
+        shutil.copyfile(cloud_profile, app / 'Contents/embedded.provisionprofile')
+    with (app / 'Contents/Info.plist').open('wb') as f:
+        plistlib.dump(plist, f)
+    subprocess.run(['/usr/bin/xattr', '-cr', str(app)], check=True)
+    with tempfile.NamedTemporaryFile(suffix='.plist') as signed_entitlements:
+        options = []
+        if entitlements:
+            plistlib.dump(entitlements, signed_entitlements)
+            signed_entitlements.flush()
+            options = ['--timestamp', '--options', 'runtime', '--entitlements', signed_entitlements.name]
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', cloud_identity or '-', *options, str(app)],
+                       check=True)
+    subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(app)], check=True)
 
 
 if __name__ == '__main__':

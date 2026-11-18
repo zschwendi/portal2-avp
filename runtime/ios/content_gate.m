@@ -17,6 +17,7 @@
 #include "content_check.h"
 #include "content_gate.h"
 #include "settings.h"
+#include "portal_save_bridge.h"
 
 // Textes : français si c'est la première langue de l'appareil, sinon anglais
 // (comme la page Réglages du jeu, en français).
@@ -205,8 +206,15 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
 }
 @end
 
+typedef NS_ENUM(NSUInteger, P2LaunchIntent) {
+    P2LaunchGameMenu,
+    P2LaunchCampaign,
+    P2LaunchContinue,
+};
+
 @interface P2ContentGateController : UIViewController
 @property(nonatomic, readonly) BOOL passed;
+@property(nonatomic, readonly) BOOL contentReady;
 @property(nonatomic, readonly) NSString *selectedSave;
 - (instancetype)initWithRoots:(const char *const *)roots;
 - (BOOL)check:(const char *)trigger;
@@ -224,6 +232,12 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
     UIButton *_button, *_menuButton;
     NSString *_continueSave;
     UIStackView *_frameRateChoices;
+    UIButton *_playOfflineButton;
+    UIButton *_saveButton;
+    UILabel *_saveStatus;
+    NSUInteger _saveAttempt;
+    BOOL _preparingSaves;
+    P2LaunchIntent _pendingLaunch;
     id _observer;
 }
 
@@ -245,6 +259,8 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
     return self;
 }
 
+- (BOOL)contentReady { return _report.complete; }
+
 - (void)dealloc {
     if (_observer) [NSNotificationCenter.defaultCenter removeObserver:_observer];
     for (int i = 0; i < 4; ++i) free(_roots[i]);
@@ -256,7 +272,7 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
     if (_documentsLayout) p2_content_check(_roots[3], &_report);
     else p2_content_check_roots(_roots[0], _roots[1], _roots[2], &_report);
     BOOL play = !strcmp(trigger, "play");
-    _passed = _report.complete && (!self.showLauncher || play);
+    _passed = _report.complete && (self.showLauncher ? play : [P2SaveBridge playOffline]);
     if (!play) _continueSave = _report.complete && self.offerContinue ? latestCampaignSave(_roots[3], _roots[0]) : nil;
     if (_roots[3]) {
         NSString *documents = [NSString stringWithUTF8String:_roots[3]];
@@ -297,13 +313,9 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
 
 - (void)checkAgain {
     if (self.showLauncher && _report.complete) {
-        if (_continueSave) {
-            _continueSave = latestCampaignSave(_roots[3], _roots[0]);
-            if (!_continueSave) { [self render]; return; }
-            _selectedSave = _continueSave;
-        }
-        [self check:"play"];
-        if (!self.passed) _selectedSave = nil;
+        P2LaunchIntent intent = P2LaunchGameMenu;
+        if (self.offerContinue) intent = _continueSave ? P2LaunchContinue : P2LaunchCampaign;
+        [self prepareSaveAndPlay:YES intent:intent];
         return;
     }
     _button.enabled = NO;
@@ -313,11 +325,64 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
     [self performSelector:@selector(checkAgainNow) withObject:nil afterDelay:0.05];
 }
 
+- (void)prepareSaveAndPlay:(BOOL)withCloud intent:(P2LaunchIntent)intent {
+    if (_passed || (_preparingSaves && withCloud)) return;
+    _preparingSaves = YES;
+    _pendingLaunch = intent;
+    NSUInteger attempt = ++_saveAttempt;
+    _button.enabled = NO;
+    _menuButton.enabled = NO;
+    _saveButton.enabled = NO;
+    _playOfflineButton.hidden = !withCloud || !P2SaveBridge.cloudConfigured;
+    _saveStatus.text = withCloud && P2SaveBridge.cloudConfigured
+        ? TEXT(@"Vérification des sauvegardes iCloud…", @"Checking iCloud saves…")
+        : TEXT(@"Vérification des sauvegardes locales…", @"Checking local saves…");
+    __weak P2ContentGateController *weakSelf = self;
+    [P2SaveBridge prepareWithCloud:withCloud completion:^(BOOL ready) {
+        P2ContentGateController *owner = weakSelf;
+        if (!owner || owner->_saveAttempt != attempt) return;
+        owner->_preparingSaves = NO;
+        owner->_playOfflineButton.hidden = YES;
+        // The save sync may have just replaced the local generation. Choose
+        // the slot only after the writer lease has been acquired.
+        owner->_selectedSave = ready && intent != P2LaunchGameMenu
+            ? latestCampaignSave(owner->_roots[3], owner->_roots[0]) : nil;
+        if (ready && (intent != P2LaunchContinue || owner->_selectedSave)) {
+            if (![owner check:"play"]) {
+                owner->_selectedSave = nil;
+                [P2SaveBridge launchDidNotStart];
+            }
+        } else if (ready) {
+            [P2SaveBridge launchDidNotStart];
+            [owner check:"save-changed"];
+            owner->_saveStatus.text = TEXT(@"Aucune sauvegarde de campagne valide. Ouvrez les sauvegardes pour vérifier les versions.",
+                                           @"No valid campaign save was found. Open Saves to check the available versions.");
+            return;
+        } else {
+            [owner check:"save-check"];
+        }
+        owner->_saveStatus.text = P2SaveBridge.status;
+    }];
+}
+
+- (void)playOffline { [self prepareSaveAndPlay:NO intent:_pendingLaunch]; }
+
+- (void)showSaveSettings {
+    __weak P2ContentGateController *weakSelf = self;
+    [P2SaveBridge presentFrom:self savesChanged:^{
+        P2ContentGateController *owner = weakSelf;
+        if (!owner || owner->_preparingSaves || owner->_passed) return;
+        if (owner->_report.complete && owner.offerContinue)
+            owner->_continueSave = latestCampaignSave(owner->_roots[3], owner->_roots[0]);
+        owner->_saveStatus.text = P2SaveBridge.status;
+        [owner render];
+    }];
+}
+
 - (void)checkAgainNow { [self check:"check-again"]; }
 
 - (void)openGameMenu {
-    _selectedSave = nil;
-    [self check:"play"];
+    [self prepareSaveAndPlay:YES intent:P2LaunchGameMenu];
 }
 
 - (void)showFrameRate:(int)limit {
@@ -415,7 +480,17 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
     UIView *divider = [[UIView alloc] init];
     divider.backgroundColor = libraryColor(LibraryLine);
     [divider.heightAnchor constraintEqualToConstant:1].active = YES;
-    return [self surfaceWithViews:@[settings, frameRateRow, divider, fpsRow]];
+    _saveButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_saveButton setTitle:TEXT(@"Sauvegardes", @"Saves") forState:UIControlStateNormal];
+    [_saveButton addTarget:self action:@selector(showSaveSettings) forControlEvents:UIControlEventTouchUpInside];
+    _saveStatus = [self label:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote] color:ink];
+    _saveStatus.numberOfLines = 0;
+    _saveStatus.text = P2SaveBridge.status;
+    _playOfflineButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_playOfflineButton setTitle:TEXT(@"Jouer hors ligne", @"Play Offline") forState:UIControlStateNormal];
+    [_playOfflineButton addTarget:self action:@selector(playOffline) forControlEvents:UIControlEventTouchUpInside];
+    _playOfflineButton.hidden = YES;
+    return [self surfaceWithViews:@[settings, frameRateRow, divider, fpsRow, _saveButton, _saveStatus, _playOfflineButton]];
 }
 
 - (void)viewDidLoad {
@@ -556,7 +631,9 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
         TEXT(@"Vérifier à nouveau", @"Check again");
     configuration.image = [UIImage systemImageNamed:ready ? @"play.fill" : @"arrow.clockwise"];
     _button.configuration = configuration;
-    _button.enabled = YES;
+    _button.enabled = !_preparingSaves;
+    _menuButton.enabled = !_preparingSaves;
+    _saveButton.enabled = !_preparingSaves;
     _menuButton.hidden = !canResume;
     if (ready) {
         _title.text = TEXT(@"Prêt à jouer", @"Ready to play");
@@ -645,9 +722,11 @@ static void drawPortal(CGContextRef context, CGPoint center, CGFloat height, CGF
 @end
 
 void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
-                         const char *documents, int show_launcher, int frame_rate_overridden,
-                         int show_fps_overridden, char resume_save[P2_IOS_SAVE_STEM_SIZE]) {
+                         const char *documents, const char *user_dir, int show_launcher,
+                         int frame_rate_overridden, int show_fps_overridden,
+                         char resume_save[P2_IOS_SAVE_STEM_SIZE]) {
     @autoreleasepool {
+        if (user_dir) [P2SaveBridge configureUserDirectory:[NSString stringWithUTF8String:user_dir]];
         const char *roots[4] = {game, linux_root, prep, documents};
         P2ContentGateController *gate = [[P2ContentGateController alloc] initWithRoots:roots];
         gate.showLauncher = show_launcher;
@@ -655,6 +734,7 @@ void rt_ios_content_gate(const char *game, const char *linux_root, const char *p
         gate.frameRateOverridden = frame_rate_overridden;
         gate.showFPSOverridden = show_fps_overridden;
         if ([gate check:"launch"]) return;
+        if (!gate.showLauncher && gate.contentReady) gate.showLauncher = YES;
         // SDL_main tourne déjà dans la boucle d'UIKit (cycle de vie classique,
         // sans UIScene) : une fenêtre à nous, et la boucle d'exécution tourne
         // ici, comme SDL_PumpEvents, jusqu'à une vérification réussie.

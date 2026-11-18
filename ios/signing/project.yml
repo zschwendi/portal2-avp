@@ -28,6 +28,19 @@ targets:
         com.apple.developer.kernel.increased-memory-limit: true
     settings:
       base: {PRODUCT_BUNDLE_IDENTIFIER: "${P2_BUNDLE_ID}"}
+  Portal2Cloud:
+    type: application
+    platform: iOS
+    sources: [Stub]
+    entitlements:
+      path: Portal2Cloud.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.icloud-services: [CloudDocuments]
+        com.apple.developer.icloud-container-identifiers: [iCloud.dev.zschwendi.portal2avp]
+        com.apple.developer.ubiquity-container-identifiers: [iCloud.dev.zschwendi.portal2avp]
+    settings:
+      base: {PRODUCT_BUNDLE_IDENTIFIER: "${P2_BUNDLE_ID}"}
   Probe:
     type: application
     platform: iOS

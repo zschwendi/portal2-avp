@@ -26,7 +26,13 @@ private final class LibraryModel: ObservableObject {
     @Published private(set) var unavailable: String?
     @Published private(set) var failure: String?
     @Published private var process: Process?
+    @Published private(set) var preparingSaves = false
+    @Published private(set) var saveOperation = false
 
+    let saveSession: PortalCloudSaves?
+    private var preflight: Task<Void, Never>?
+    private var playRequest = 0
+    private var lease: PortalSaveWriterLease?
     private let bundle: Bundle
     private let paths: LauncherPaths?
     private var worker: URL? { bundle.resourceURL?.appendingPathComponent("launch-game") }
@@ -36,11 +42,16 @@ private final class LibraryModel: ObservableObject {
         paths = bundle.url(forResource: "launch", withExtension: "json")
             .flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode(LauncherPaths.self, from: $0) }
+        saveSession = paths.map {
+            PortalCloudSaves(userDirectory: URL(fileURLWithPath: $0.saves, isDirectory: true), bundle: bundle)
+        }
         recheck()
     }
 
     var launching: Bool { process != nil }
-    var canPlay: Bool { unavailable == nil && !launching }
+    var canPlay: Bool { unavailable == nil && canUseSaveControls }
+    var canUseSaveControls: Bool { !launching && !preparingSaves && !saveOperation }
+    var canPlayOffline: Bool { unavailable == nil && !launching && (preparingSaves || saveOperation) }
     var gameFolder: String? { paths?.game }
     var saveFolder: String? { paths?.saves }
     var logFile: String? { paths?.log }
@@ -66,31 +77,101 @@ private final class LibraryModel: ObservableObject {
     func play() {
         guard !launching else { return }
         recheck()
-        guard canPlay, let worker else { return }
+        guard canPlay, let paths, let saveSession else { return }
+
+        do {
+            lease = try PortalSaveWriterLease(userDirectory: URL(fileURLWithPath: paths.saves, isDirectory: true))
+        } catch {
+            failure = error.localizedDescription
+            return
+        }
+        failure = saveSession.layoutIssue
+        guard let saves = saveSession.controller else {
+            finishPreflight(true)
+            return
+        }
+        preparingSaves = true
+        playRequest += 1
+        let request = playRequest
+        preflight = Task { [weak self] in
+            let ready = await saves.prepareForPlay()
+            guard let self, playRequest == request, !Task.isCancelled else { return }
+            finishPreflight(ready)
+        }
+    }
+
+    func playOffline() {
+        guard canPlayOffline, let saves = saveSession?.controller else { return }
+        playRequest += 1
+        preflight?.cancel()
+        saveOperation = false
+        finishPreflight(saves.playOffline())
+    }
+
+    private func finishPreflight(_ ready: Bool) {
+        preparingSaves = false
+        preflight = nil
+        guard ready, let worker, let lease else {
+            self.lease = nil
+            failure = saveSession?.controller?.status
+            return
+        }
 
         let child = Process()
         child.executableURL = worker
         child.arguments = Array(CommandLine.arguments.dropFirst()).filter { !$0.hasPrefix("-psn_") }
+        child.standardInput = lease.handle
+        var environment = ProcessInfo.processInfo.environment
+        environment[PortalSaveWriterLease.inheritedEnvironment] = "1"
+        child.environment = environment
         child.terminationHandler = { [weak self] task in
             let status = task.terminationStatus
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.process = nil
-                if status != 0 {
-                    self.failure = "Portal 2 stopped with status \(status). Open the launch log for details."
-                }
-                self.recheck()
-            }
+            Task { @MainActor [weak self] in await self?.finished(status: status) }
         }
 
-        failure = nil
         process = child
         do {
             try child.run()
         } catch {
             process = nil
+            self.lease = nil
+            saveSession?.controller?.gameplayDidEnd()
             failure = "Portal 2 couldn’t start. \(error.localizedDescription)"
         }
+    }
+
+    private func finished(status: Int32) async {
+        // Process termination is the proof its native and guest writers exited.
+        saveOperation = true
+        let request = playRequest
+        process = nil
+        if status != 0 {
+            failure = "Portal 2 stopped with status \(status). Open the launch log for details."
+        }
+        if let saves = saveSession?.controller {
+            saves.gameplayDidEnd()
+            await saves.syncNow()
+        }
+        guard playRequest == request else { return }
+        lease = nil
+        saveOperation = false
+        recheck()
+    }
+
+    func withIdleSaveLease(_ action: () async -> Void) async {
+        guard canUseSaveControls, let paths else { return }
+        do {
+            lease = try PortalSaveWriterLease(userDirectory: URL(fileURLWithPath: paths.saves, isDirectory: true))
+        } catch {
+            failure = error.localizedDescription
+            return
+        }
+        saveOperation = true
+        let request = playRequest
+        await action()
+        guard playRequest == request else { return }
+        lease = nil
+        saveOperation = false
     }
 
     func canReveal(_ path: String?) -> Bool {
@@ -174,6 +255,7 @@ private struct PortalArtwork: View {
 
 private struct LibraryView: View {
     @ObservedObject var model: LibraryModel
+    @State private var showsSaves = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -186,6 +268,8 @@ private struct LibraryView: View {
                 Menu {
                     Button("Show Game Files") { model.reveal(model.gameFolder) }
                         .disabled(!model.canReveal(model.gameFolder))
+                    Button("Saves…") { showsSaves = true }
+                        .disabled(model.saveSession == nil)
                     Button("Open Saves Folder") { model.reveal(model.saveFolder) }
                         .disabled(!model.canReveal(model.saveFolder))
                     Button("Show Launch Log") { model.reveal(model.logFile) }
@@ -207,8 +291,11 @@ private struct LibraryView: View {
                 HStack(spacing: 22) {
                     status
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(action: model.play) {
-                        Label("Play", systemImage: "play.fill")
+                    Button {
+                        if model.canPlayOffline { model.playOffline() }
+                        else { model.play() }
+                    } label: {
+                        Label(model.canPlayOffline ? "Play Offline" : "Play", systemImage: "play.fill")
                             .font(.system(size: 15, weight: .semibold))
                             .frame(minWidth: 85)
                             .padding(.horizontal, 16)
@@ -216,8 +303,8 @@ private struct LibraryView: View {
                     }
                     .buttonStyle(PlayButtonStyle())
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!model.canPlay)
-                    .accessibilityLabel("Play Portal 2")
+                    .disabled(!model.canPlayOffline && !model.canPlay)
+                    .accessibilityLabel(model.canPlayOffline ? "Play Portal 2 offline" : "Play Portal 2")
                 }
                 .padding(18)
                 .background(Palette.canvas)
@@ -233,12 +320,19 @@ private struct LibraryView: View {
         .background(LinearGradient(colors: [Palette.canvas, Palette.wash],
                                    startPoint: .top, endPoint: .bottom))
         .preferredColorScheme(.light)
+        .sheet(isPresented: $showsSaves) {
+            LibrarySaveSheet(model: model)
+        }
     }
 
     @ViewBuilder private var status: some View {
         if let warning = model.unavailable ?? model.failure {
             Label(warning, systemImage: "exclamationmark.circle")
                 .foregroundStyle(Palette.orange)
+        } else if model.preparingSaves {
+            ProgressView(model.saveSession?.cloudConfigured == true ? "Checking iCloud saves…" : "Checking local saves…")
+        } else if model.saveOperation {
+            ProgressView("Checking saves…")
         } else if model.launching {
             Label("Game session active", systemImage: "play.circle")
                 .foregroundStyle(Palette.secondary)
@@ -246,6 +340,30 @@ private struct LibraryView: View {
             Label("Ready to play", systemImage: "checkmark.circle")
                 .foregroundStyle(Palette.secondary)
         }
+    }
+}
+
+private struct LibrarySaveSheet: View {
+    @ObservedObject var model: LibraryModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Saves").font(.headline)
+            if let session = model.saveSession, let saves = session.controller {
+                PortalSaveControls(saves: saves, cloudConfigured: session.cloudConfigured,
+                    idle: !model.launching && !model.preparingSaves,
+                    sync: { await model.withIdleSaveLease { await saves.syncNow() } },
+                    resolve: { unit, id in
+                        await model.withIdleSaveLease { await saves.resolve(unit: unit, keeping: id) }
+                    })
+            } else if let issue = model.saveSession?.layoutIssue {
+                Text(issue)
+            }
+            if let failure = model.failure { Text(failure).font(.callout).foregroundStyle(.secondary) }
+            Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+        }
+        .padding(24).frame(minWidth: 360)
     }
 }
 

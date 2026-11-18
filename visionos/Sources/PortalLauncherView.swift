@@ -18,6 +18,9 @@ struct PortalLibraryView: View {
     let startImport: (URL) -> Void
     let cancelImport: () -> Void
     let dismissMessage: () -> Void
+    let saveSession: PortalCloudSaves
+    let canUseSaveControls: Bool
+    let playOffline: (() -> Void)?
     @Binding var sheet: PortalLibrarySheet?
     @ObservedObject private var readiness = PortalControllerReadiness.shared
     @State private var explanation: String?
@@ -34,6 +37,11 @@ struct PortalLibraryView: View {
                         PortalGameCard(state: state, detail: cardDetail, focused: readiness.focused,
                                        activate: primary)
                             .frame(maxWidth: 620)
+                        if let playOffline {
+                            ProgressView("Checking iCloud saves…")
+                            Button("Play Offline", action: playOffline)
+                                .buttonStyle(PortalCapsuleButtonStyle(prominent: false))
+                        }
                         if case .needsFiles = state, canCheckAgain {
                             Button("Check Again", action: checkAgain)
                                 .buttonStyle(PortalCapsuleButtonStyle(prominent: false))
@@ -76,7 +84,8 @@ struct PortalLibraryView: View {
                     PortalImportSheet(setup: setup, importer: importer, importing: importing, checking: checking,
                                       start: startImport, cancel: cancelImport, checkAgain: checkAgain) { sheet = nil }
                 case .settings:
-                    PortalSettingsSheet(setup: setup, readiness: readiness) { sheet = nil }
+                    PortalSettingsSheet(saveSession: saveSession, canUseSaveControls: canUseSaveControls,
+                                        setup: setup, readiness: readiness) { sheet = nil }
                 }
             }
             .portalThemed()
@@ -389,6 +398,8 @@ struct PortalImportSheet: View {
 }
 
 struct PortalSettingsSheet: View {
+    let saveSession: PortalCloudSaves
+    let canUseSaveControls: Bool
     let setup: PortalContentSetup?
     @ObservedObject var readiness: PortalControllerReadiness
     let close: () -> Void
@@ -442,14 +453,18 @@ struct PortalSettingsSheet: View {
                 .listRowBackground(PortalStyle.surface)
                 Section("Saves and game files") {
                     row("Game files", setup.map { $0.complete ? "Complete" : "Incomplete" } ?? "Not checked yet")
-                    Text("Saves and settings stay on this Vision Pro with the app. Deleting the app deletes them.")
-                        .foregroundStyle(PortalStyle.textSecondary)
+                    if let saves = saveSession.controller {
+                        PortalSaveControls(saves: saves, cloudConfigured: saveSession.cloudConfigured,
+                            idle: canUseSaveControls, sync: { await saves.syncNow() },
+                            resolve: { await saves.resolve(unit: $0, keeping: $1) })
+                    } else if let issue = saveSession.layoutIssue {
+                        Text(issue).foregroundStyle(PortalStyle.textSecondary)
+                    }
                 }
                 .listRowBackground(PortalStyle.surface)
                 Section("Online") {
                     row("Steam Workshop", "Not available")
                     row("Online co-op", "Not available")
-                    row("Cloud saves", "Not available")
                 }
                 .listRowBackground(PortalStyle.surface)
                 Section {
