@@ -87,6 +87,12 @@ final class PortalRenderer: @unchecked Sendable {
     private var laserShown = false
     private var reportedGame = false
     private var frameLeases: [Int32] = []
+    private var cadenceStart: Double?
+    private var cadenceSubmissions = 0
+    private var cadenceImages = 0
+    private var cadenceReports = 0
+    private var lastImageSequence: UInt64?
+    private let auditCadence = ProcessInfo.processInfo.environment["P2_VISION_FRAME_AUDIT"] == "1"
     private enum FrameContent: String { case menu = "menu-panel", world = "stereo-world", simulator = "simulator-panel" }
     private var frameContent: FrameContent?
     #if targetEnvironment(simulator)
@@ -383,7 +389,7 @@ final class PortalRenderer: @unchecked Sendable {
         if builtIn { p2_xr_publish_frame(session, &xr) }
         #if P2_GAME
         encodeGame(drawable: drawable,command: command,tracked: tracked,currentAnchor: anchor,builtIn: builtIn,
-                   aim: xr.controllers.1)
+                   aim: xr.controllers.1, timestamp: timestamp)
         #else
         if originFromScene == nil {
             var origin = matrix_identity_float4x4
@@ -458,7 +464,8 @@ final class PortalRenderer: @unchecked Sendable {
     }
 
     private func encodeGame(drawable: LayerRenderer.Drawable,command: MTLCommandBuffer,
-                            tracked: Bool,currentAnchor: DeviceAnchor?,builtIn: Bool,aim: P2XRControllerPose) {
+                            tracked: Bool,currentAnchor: DeviceAnchor?,builtIn: Bool,aim: P2XRControllerPose,
+                            timestamp: Double) {
         #if targetEnvironment(simulator)
         let preview = simulatorPreview
         #else
@@ -568,8 +575,12 @@ final class PortalRenderer: @unchecked Sendable {
         // Released by renderFrame's completion handler, after the GPU is done.
         if leased { frameLeases.append(frame.slot) }
         if builtIn && eyesDrawn > 0 && eyesDrawn == drawable.views.count {
-            if worldReady { frameContent = .world }
-            else if panelReady { frameContent = preview ? .simulator : .menu }
+            if worldReady {
+                frameContent = .world
+                recordWorldCadence(timestamp: timestamp, image: frame.sequence)
+            } else if panelReady {
+                frameContent = preview ? .simulator : .menu
+            }
         }
         if frameContent == .world && !reportedGame {
             reportedGame = true
@@ -578,6 +589,26 @@ final class PortalRenderer: @unchecked Sendable {
                 NSLog("[P2XR] Game stereo GPU submission completed: image=%llu pose=%llu eyes=2 status=%lu; physical acceptance pending",image,pose,buffer.status.rawValue)
             }
         }
+    }
+
+    private func recordWorldCadence(timestamp: Double, image: UInt64) {
+        guard cadenceReports < 3 else { return }
+        let limit = p2_vision_game_fps_limit()
+        guard auditCadence || limit > 60 else { return }
+        let start = cadenceStart ?? timestamp
+        cadenceStart = start
+        let elapsed = timestamp - start
+        if elapsed >= 2 {
+            NSLog("[P2XR] World cadence: eye submissions %.1f/s, distinct game images %.1f/s, engine cap %d FPS",
+                  Double(cadenceSubmissions) / elapsed, Double(cadenceImages) / elapsed, limit)
+            cadenceStart = timestamp
+            cadenceSubmissions = 0
+            cadenceImages = 0
+            cadenceReports += 1
+        }
+        cadenceSubmissions += 1
+        if image != lastImageSequence { cadenceImages += 1 }
+        lastImageSequence = image
     }
 
     // Menu panel half extents (meters at 2 m), always the engine image's own

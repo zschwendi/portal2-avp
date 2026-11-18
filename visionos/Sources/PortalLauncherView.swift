@@ -392,10 +392,18 @@ struct PortalSettingsSheet: View {
     let setup: PortalContentSetup?
     @ObservedObject var readiness: PortalControllerReadiness
     let close: () -> Void
+    @AppStorage("P2VisionHighFrameRate") private var highFrameRate = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Display") {
+                    Toggle("High Frame Rate", isOn: $highFrameRate)
+                    Text("Caps the game at \(p2_vision_game_hfr_target()) FPS on this headset. Changes apply the next time you start the game.")
+                        .font(.footnote)
+                        .foregroundStyle(PortalStyle.textSecondary)
+                }
+                .listRowBackground(PortalStyle.surface)
                 Section("Controllers") {
                     Label(readiness.route.summary, systemImage: readiness.route.ready ? "checkmark.circle.fill" : "exclamationmark.circle")
                         .foregroundStyle(readiness.route.ready ? PortalStyle.success : PortalStyle.warning)

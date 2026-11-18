@@ -391,7 +391,7 @@ private struct PortalGameSurface: UIViewRepresentable {
         view.layer.isOpaque = true
         view.colorPixelFormat = .bgra8Unorm_srgb
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = Int(p2_vision_game_fps_limit())
         context.coordinator.configure(view)
         view.delegate = context.coordinator
         return view

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 #include "game_vision.h"
@@ -19,8 +20,25 @@
 int p2_main(int argc, char **argv);
 int rt_ios_game_ui_visible_shared(void); // runtime/ios/game_state.c
 static _Atomic int state;
+static _Atomic int started_fps_limit;
 int p2_vision_game_state(void) { return atomic_load(&state); }
 int p2_vision_game_ui_visible(void) { return atomic_load(&state) == 1 && rt_ios_game_ui_visible_shared(); }
+
+int p2_vision_game_hfr_target(void) {
+    struct utsname device;
+    // M5 Vision Pro supports a 120 Hz mode. Use 90 for M2 and unknown models.
+    if (uname(&device) == 0 && strcmp(device.machine, "RealityDevice17,1") == 0) return 120;
+    return 90;
+}
+
+static int configured_fps_limit(void) {
+    return [NSUserDefaults.standardUserDefaults boolForKey:@"P2VisionHighFrameRate"] ? p2_vision_game_hfr_target() : 60;
+}
+
+int p2_vision_game_fps_limit(void) {
+    int started = atomic_load(&started_fps_limit);
+    return started ? started : configured_fps_limit();
+}
 
 // Immersive eye size request: width << 32 | height, 0 for the windowed size.
 static _Atomic uint64_t eye_request, eye_withdrawn_ns;
@@ -133,8 +151,10 @@ int p2_vision_game_start(const char *trigger) {
         content_status(documents, &report, trigger, atomic_load(&state) == 1);
         return atomic_load(&state) == -1 ? -1 : 0;
     }
+    int fps_limit = configured_fps_limit();
     int expected = current;
     if (!atomic_compare_exchange_strong(&state, &expected, 1)) return 0;
+    atomic_store(&started_fps_limit, fps_limit);
     content_status(documents, &report, trigger, 1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         @autoreleasepool {
@@ -171,7 +191,9 @@ int p2_vision_game_start(const char *trigger) {
                 [documents stringByAppendingPathComponent:@"game"], @"--linux-root",
                 [documents stringByAppendingPathComponent:@"linux"], @"--user-dir", user,
                 @"--", @"-game", @"portal2", @"-novid", @"-window", @"-insecure",
-                @"-w", @"1280", @"-h", @"720", @"+mat_queue_mode", @"0", @"+fps_max", @"60"] mutableCopy];
+                @"-w", @"1280", @"-h", @"720", @"+mat_queue_mode", @"0"] mutableCopy];
+            BOOL high_frame_rate = fps_limit > 60;
+            if (!high_frame_rate) [arguments addObjectsFromArray:@[@"+fps_max", @"60"]];
             NSString *extra = [NSString stringWithContentsOfFile:[documents stringByAppendingPathComponent:@"launch.args"]
                                                        encoding:NSUTF8StringEncoding error:nil];
 #if TARGET_OS_SIMULATOR
@@ -193,10 +215,13 @@ int p2_vision_game_start(const char *trigger) {
 #endif
             for (NSString *line in [extra componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
                 if (line.length && ![line hasPrefix:@"#"]) [arguments addObject:line];
+            if (high_frame_rate) [arguments addObjectsFromArray:@[@"+fps_max", @(fps_limit).stringValue]];
             int argc = (int)arguments.count;
             char **argv = calloc((size_t)argc + 1, sizeof(*argv));
             if (!argv) { atomic_store(&state, 2); return; }
             for (int i = 0; i < argc; ++i) argv[i] = strdup(arguments[(NSUInteger)i].UTF8String);
+            fprintf(stderr, "[vision-game] Engine frame rate target: %d FPS (%s)\n", fps_limit,
+                    high_frame_rate ? "High Frame Rate" : "launch default");
             fprintf(stderr, "[vision-game] Starting actual recompiled Portal 2; offline mobile Steam stub; immersive stereo not attached\n");
             int result = p2_main(argc, argv);
             fprintf(stderr, "[vision-game] Engine returned %d\n", result);

@@ -9,6 +9,10 @@
 // check in Documents/portal2-setup-status.json. Any thread.
 int p2_vision_game_start(const char *trigger);
 int p2_vision_game_state(void);
+// High Frame Rate uses the P2VisionHighFrameRate preference and is applied at
+// engine start. These are app frame-rate targets. Any thread.
+int p2_vision_game_hfr_target(void);
+int p2_vision_game_fps_limit(void);
 // Runs the completeness check without starting the engine (also writes the
 // status file, and remembers the report). Returns report->complete. Any thread.
 int p2_vision_content_check(const char *trigger, P2ContentReport *report);
