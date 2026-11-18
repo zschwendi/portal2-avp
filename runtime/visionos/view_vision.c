@@ -30,6 +30,7 @@ static float previous_yaw;
 static unsigned stereo_frames;
 static uint32_t previous_buttons;
 static uint32_t crosshair_base, skip_crosshair_paint;
+static int crosshair_hidden;
 static float units_per_meter = P2_XR_UNITS_PER_METER, snap_degrees = 45, smooth_rate = P2_XR_117_SMOOTH_RATE;
 void rt_ios_game_state_poll(void);
 int rt_ios_game_ui_visible(void);
@@ -42,13 +43,14 @@ static void put_vector(uint32_t address, unsigned offset, vector_float3 value) {
 static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
 
 // The reticle is guest HUD paint, independent of camera tracking and portal
-// aim. Replace only its two HUD classes' Paint entries during stereo capture.
+// aim. Replace only its two HUD classes' Paint entries while XR presents.
+// VGUI can paint after RenderView returns, so this uses session ownership.
 static int skip_paint(CPU *c, const char *name) {
     if (strcmp(name, "__p2_vision_skip_crosshair_paint")) return 0;
     static int reported;
     if (!reported) {
         reported = 1;
-        fprintf(stderr, "[vision-view] Skipped guest reticle paint during stereo capture\n");
+        fprintf(stderr, "[vision-view] Skipped guest reticle paint for immersive presentation\n");
     }
     c->eax = 0;
     return 1;
@@ -76,11 +78,12 @@ static void resolve_crosshair_paint(CPU *c, uint32_t base) {
 
 static void hide_crosshair(int hidden) {
 #if P2_XR_CROSSHAIR_PAINT_COUNT
-    if (!skip_crosshair_paint) return;
+    if (!skip_crosshair_paint || hidden == crosshair_hidden) return;
     for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i) {
         W32(crosshair_base + p2_xr_crosshair_paint[i].slot,
             hidden ? skip_crosshair_paint : crosshair_base + p2_xr_crosshair_paint[i].paint);
     }
+    crosshair_hidden = hidden;
 #else
     (void)hidden;
 #endif
@@ -301,7 +304,6 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     matrix_float4x4 cover[2] = {matrix_identity_float4x4,matrix_identity_float4x4};
     float aspect = (float)width / (float)height;
     rendering = 1;
-    hide_crosshair(1);
     for (unsigned eye = 0; eye < 2; ++eye) {
         memcpy(GPTR(eye_views[eye]),camera,sizeof(camera));
         memcpy(GPTR(eye_hud[eye]),hud,sizeof(hud));
@@ -363,7 +365,6 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // the captured left image is complete. Mono fallback must restore eye 0.
     int marked = p2_vision_gl_mark_stereo(session,session ? &pose : NULL,diagnostic);
     if (!marked) goto mono;
-    hide_crosshair(0);
     rendering = 0;
     if (marked && ++stereo_frames <= 3)
         fprintf(stderr,"[vision-view] Stereo pair #%u rendered: session=%llu pose=%llu diagnostic=%d head_aim=%d; physical gameplay unverified\n",
@@ -371,7 +372,6 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
             session && aim_session == session);
     return marked;
 mono:
-    hide_crosshair(0);
     rendering = 0;
     p2_vision_gl_begin_eye(0);
     return 0;
@@ -493,7 +493,8 @@ static void read_settings(void) {
 
 void p2_vision_view_poll(void) {
     if (enabled < 0) read_settings();
-    if (!installed && !failed && (enabled || stereo_audit || input_audit || p2_xr_read_latest(NULL,NULL))) {
+    int immersive = stereo_audit || p2_xr_read_latest(NULL,NULL) != 0;
+    if (!installed && !failed && (enabled || immersive || input_audit)) {
         const GuestModule *client = rt_find_module("client.so");
         if (!client) return;
         table = client->base + P2_XR_CLIENT_VTABLE_RVA;
@@ -517,6 +518,7 @@ void p2_vision_view_poll(void) {
         // Pass-through until the tracked controller aims (aim_vision.c).
         p2_vision_viewmodel_install(c);
     }
+    hide_crosshair(installed && !failed && immersive);
     aim_poll();
 }
 #endif
