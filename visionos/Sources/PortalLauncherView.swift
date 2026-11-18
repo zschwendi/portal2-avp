@@ -12,7 +12,7 @@ struct PortalLibraryView: View {
     @ObservedObject var importer: PortalContentImporter
     let importing: Bool
     let checking: Bool
-    let play: () -> Void
+    let play: (PortalCampaignLaunch) -> Void
     let resume: () -> Void
     let checkAgain: () -> Void
     let startImport: (URL) -> Void
@@ -20,6 +20,7 @@ struct PortalLibraryView: View {
     let dismissMessage: () -> Void
     let saveSession: PortalCloudSaves
     let canUseSaveControls: Bool
+    let savesChanged: () -> Void
     let playOffline: (() -> Void)?
     @Binding var sheet: PortalLibrarySheet?
     @ObservedObject private var readiness = PortalControllerReadiness.shared
@@ -37,6 +38,10 @@ struct PortalLibraryView: View {
                         PortalGameCard(state: state, detail: cardDetail, focused: readiness.focused,
                                        activate: primary)
                             .frame(maxWidth: 620)
+                        if state == .continueCampaign {
+                            Button("Game Menu") { play(.gameMenu) }
+                                .buttonStyle(PortalCapsuleButtonStyle(prominent: false))
+                        }
                         if let playOffline {
                             ProgressView("Checking iCloud saves…")
                             Button("Play Offline", action: playOffline)
@@ -85,7 +90,8 @@ struct PortalLibraryView: View {
                                       start: startImport, cancel: cancelImport, checkAgain: checkAgain) { sheet = nil }
                 case .settings:
                     PortalSettingsSheet(saveSession: saveSession, canUseSaveControls: canUseSaveControls,
-                                        setup: setup, readiness: readiness) { sheet = nil }
+                                        savesChanged: savesChanged, setup: setup,
+                                        readiness: readiness) { sheet = nil }
                 }
             }
             .portalThemed()
@@ -111,7 +117,8 @@ struct PortalLibraryView: View {
     private func primary() {
         switch state.action {
         case .importFiles, .showProgress: sheet = .importFiles
-        case .play: play()
+        case .play: play(.campaignIfPresent)
+        case .continueCampaign: play(.continueCampaign)
         case .resume: resume()
         case .explain(let reason): explanation = reason
         case .wait: break
@@ -120,7 +127,7 @@ struct PortalLibraryView: View {
 
     private var canCheckAgain: Bool {
         switch state {
-        case .needsFiles, .ready: return !checking
+        case .needsFiles, .ready, .continueCampaign: return !checking
         default: return false
         }
     }
@@ -133,6 +140,7 @@ struct PortalLibraryView: View {
             return setup.complete ? setup.headline : setup.detail
         case .importing: return importer.status
         case .ready: return "Play in this window, then use the expand arrows to play around you."
+        case .continueCampaign: return "Resume from your latest campaign save."
         case .starting: return "Starting Portal 2\u{2026}"
         case .paused: return "Your game is paused right where you left it."
         case .stopped: return PortalCardState.stoppedReason
@@ -231,7 +239,7 @@ struct PortalGameCard: View {
 
     private var statusColor: Color {
         switch state {
-        case .ready: return PortalStyle.success
+        case .ready, .continueCampaign: return PortalStyle.success
         case .paused: return PortalStyle.accent
         case .needsFiles(let incomplete): return incomplete ? PortalStyle.warning : PortalStyle.textSecondary
         case .stopped: return PortalStyle.danger
@@ -400,6 +408,7 @@ struct PortalImportSheet: View {
 struct PortalSettingsSheet: View {
     let saveSession: PortalCloudSaves
     let canUseSaveControls: Bool
+    let savesChanged: () -> Void
     let setup: PortalContentSetup?
     @ObservedObject var readiness: PortalControllerReadiness
     let close: () -> Void
@@ -455,8 +464,13 @@ struct PortalSettingsSheet: View {
                     row("Game files", setup.map { $0.complete ? "Complete" : "Incomplete" } ?? "Not checked yet")
                     if let saves = saveSession.controller {
                         PortalSaveControls(saves: saves, cloudConfigured: saveSession.cloudConfigured,
-                            idle: canUseSaveControls, sync: { await saves.syncNow() },
-                            resolve: { await saves.resolve(unit: $0, keeping: $1) })
+                            idle: canUseSaveControls, sync: {
+                                await saves.syncNow()
+                                savesChanged()
+                            }, resolve: {
+                                await saves.resolve(unit: $0, keeping: $1)
+                                savesChanged()
+                            })
                     } else if let issue = saveSession.layoutIssue {
                         Text(issue).foregroundStyle(PortalStyle.textSecondary)
                     }

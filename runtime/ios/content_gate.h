@@ -1,5 +1,5 @@
 #pragma once
-#define P2_IOS_SAVE_STEM_SIZE 64
+#include "campaign_save.h"
 // Porte d'entrée du contenu du joueur (runtime/content_check.h) avant le
 // moteur, appelée par ios/main_ios.c sur le thread principal (SDL_main).
 // Contenu complet hors lanceur : retour immédiat. Sinon, écran natif
@@ -14,4 +14,4 @@
 void rt_ios_content_gate(const char *game, const char *linux_root, const char *prep,
                          const char *documents, const char *user_dir, int show_launcher,
                          int frame_rate_overridden, int show_fps_overridden,
-                         char resume_save[P2_IOS_SAVE_STEM_SIZE]);
+                         char resume_save[P2_CAMPAIGN_SAVE_STEM_SIZE]);

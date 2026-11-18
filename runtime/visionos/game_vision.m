@@ -14,6 +14,7 @@
 #include "game_vision.h"
 #include "input_vision.h"
 #include "video_config.h"
+#include "../ios/campaign_save.h"
 #include <SDL.h>
 
 int p2_main(int argc, char **argv);
@@ -67,6 +68,16 @@ static int have_report;
 
 static NSString *documents_folder(void) {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+}
+
+static NSString *latest_campaign_save(NSString *documents) {
+    if (!documents.length) return nil;
+    NSString *game = [documents stringByAppendingPathComponent:@"game"];
+    return p2_latest_campaign_save(documents.fileSystemRepresentation, game.fileSystemRepresentation);
+}
+
+int p2_vision_has_campaign_save(void) {
+    @autoreleasepool { return latest_campaign_save(documents_folder()) != nil; }
 }
 
 // Checks Documents, adds the volume sizes and remembers the report.
@@ -133,7 +144,7 @@ int p2_vision_content_last(P2ContentReport *out) {
     return have;
 }
 
-int p2_vision_game_start(const char *trigger) {
+int p2_vision_game_start(const char *trigger, int intent) {
     int current = atomic_load(&state);
     if (current == 1 || current == 2) return 0;
     NSString *documents = documents_folder();
@@ -143,6 +154,11 @@ int p2_vision_game_start(const char *trigger) {
         atomic_compare_exchange_strong(&state, &current, -1);  // never overwrite a concurrent start
         content_status(documents, &report, trigger, atomic_load(&state) == 1);
         return atomic_load(&state) == -1 ? -1 : 0;
+    }
+    NSString *save = intent == P2_VISION_GAME_MENU ? nil : latest_campaign_save(documents);
+    if (!save && intent == P2_VISION_CAMPAIGN_REQUIRED) {
+        content_status(documents, &report, trigger, 0);
+        return -2;
     }
     int fps_limit = configured_fps_limit();
     int expected = current;
@@ -193,7 +209,7 @@ int p2_vision_game_start(const char *trigger) {
             const char *input_audit = getenv("P2_VISION_INPUT_AUDIT");
             if (input_audit && !strcmp(input_audit,"1")) [arguments addObject:@"-condebug"];
             const char *test_map = getenv("P2_VISION_TEST_MAP");
-            if (test_map && *test_map) {
+            if (!save && test_map && *test_map) {
                 NSString *map = [NSString stringWithUTF8String:test_map];
                 NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
                     @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
@@ -206,8 +222,24 @@ int p2_vision_game_start(const char *trigger) {
                 }
             }
 #endif
-            for (NSString *line in [extra componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
-                if (line.length && ![line hasPrefix:@"#"]) [arguments addObject:line];
+            BOOL skipOverrideValue = NO;
+            for (NSString *line in [extra componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+                if (!line.length || [line hasPrefix:@"#"]) continue;
+                if (skipOverrideValue) {
+                    skipOverrideValue = NO;
+                    if (![line hasPrefix:@"+"] && ![line hasPrefix:@"-"]) continue;
+                }
+                if (save && ([line caseInsensitiveCompare:@"+map"] == NSOrderedSame ||
+                             [line caseInsensitiveCompare:@"+load"] == NSOrderedSame)) {
+                    skipOverrideValue = YES;
+                    continue;
+                }
+                [arguments addObject:line];
+            }
+            if (save) {
+                fprintf(stderr, "[vision-game] Continuing from campaign save %s\n", save.UTF8String);
+                [arguments addObjectsFromArray:@[@"+load", save]];
+            }
             if (high_frame_rate) [arguments addObjectsFromArray:@[@"+fps_max", @(fps_limit).stringValue]];
             int argc = (int)arguments.count;
             char **argv = calloc((size_t)argc + 1, sizeof(*argv));

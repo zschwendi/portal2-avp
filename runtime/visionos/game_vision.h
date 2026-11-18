@@ -2,12 +2,17 @@
 #include "../content_check.h"
 // One engine lifetime per app process. 0 idle, 1 starting/running, 2 returned,
 // -1 owned content missing or incomplete. Displayed GPU frames are tracked separately.
-// Starts only when the owned content under Documents is complete
-// (content_check.h); otherwise returns -1 and p2_vision_content_last has the
-// reason. Returns 0 when it started it, or when it is already running or
-// returned. `trigger` ("launch", "check-again", ...) is recorded with every
-// check in Documents/portal2-setup-status.json. Any thread.
-int p2_vision_game_start(const char *trigger);
+enum {
+    P2_VISION_GAME_MENU,
+    P2_VISION_CAMPAIGN_IF_PRESENT,
+    P2_VISION_CAMPAIGN_REQUIRED,
+};
+// Returns 0 after starting the engine or when it already ran. Returns -1 for
+// incomplete owned content, or -2 if Continue requires a save and none is valid.
+// Call with the save writer lease held. The trigger is recorded in setup status.
+int p2_vision_game_start(const char *trigger, int intent);
+// Non-mutating Library preview. The start itself validates the current save again.
+int p2_vision_has_campaign_save(void);
 int p2_vision_game_state(void);
 // High Frame Rate uses the P2VisionHighFrameRate preference and is applied at
 // engine start. These are app frame-rate targets. Any thread.

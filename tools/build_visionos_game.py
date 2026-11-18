@@ -69,7 +69,8 @@ def main():
     units = [(str(p), runtime) for p in sorted(Path('runtime').glob('*.c'))]
     units += [(str(Path('runtime/ios') / name), runtime) for name in
               ('essl3.c','srgb.c','case_path.c','fontconfig_min.c','game_state.c','steam_stub.c','steam_stub_generated.c')]
-    units += [('runtime/ios/gl_ios.m',runtime + ['-fobjc-arc'])]
+    units += [(str(Path('runtime/ios') / name), runtime + ['-fobjc-arc'])
+              for name in ('gl_ios.m', 'campaign_save.m')]
     units += [(str(p), runtime + (['-fobjc-arc'] if p.suffix == '.m' else []))
               for p in sorted(Path('runtime/visionos').glob('*')) if p.suffix in ('.c','.m')]
     units.append(('src/main.c',runtime + ['-Dmain=p2_main']))

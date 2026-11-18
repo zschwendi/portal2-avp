@@ -4,6 +4,18 @@ import GameController
 import MetalKit
 import SwiftUI
 
+enum PortalCampaignLaunch: Equatable, Sendable {
+    case gameMenu, campaignIfPresent, continueCampaign
+
+    var native: Int32 {
+        switch self {
+        case .gameMenu: return Int32(P2_VISION_GAME_MENU)
+        case .campaignIfPresent: return Int32(P2_VISION_CAMPAIGN_IF_PRESENT)
+        case .continueCampaign: return Int32(P2_VISION_CAMPAIGN_REQUIRED)
+        }
+    }
+}
+
 // The one window: the Library (PortalLauncherView.swift) until Play, then the
 // running game with the expand arrows. The engine has one lifetime per
 // process; the Library can cover the running game (Resume returns to it) and
@@ -21,6 +33,7 @@ struct PortalGameView: View {
     private let saveSession = PortalCloudSaves.mobile
     @State private var savePlayRequest = 0
     @State private var preparingSaves = false
+    @State private var pendingLaunch = PortalCampaignLaunch.gameMenu
     @State private var engine = p2_vision_game_state()
     @State private var importing = false
     @State private var importTask: Task<Void, Never>?
@@ -123,11 +136,12 @@ struct PortalGameView: View {
 
     private var library: some View {
         PortalLibraryView(state: cardState, setup: setup, message: notice, importer: importer,
-                          importing: importing, checking: checking, play: { Task { await play() } },
+                          importing: importing, checking: checking, play: { intent in Task { await play(intent) } },
                           resume: resume, checkAgain: { Task { await refresh("check-again", start: false) } },
                           startImport: startImport, cancelImport: { importTask?.cancel() },
                           dismissMessage: { notice = nil }, saveSession: saveSession,
                           canUseSaveControls: engine != 1 && engine != 2 && !starting && !checking,
+                          savesChanged: { Task { await refresh("saves-updated", start: false) } },
                           playOffline: preparingSaves && saveSession.cloudConfigured
                             ? { Task { await startFromLocalSaves() } } : nil,
                           sheet: $sheet)
@@ -137,7 +151,8 @@ struct PortalGameView: View {
         PortalCardState.resolve(engine: engine, content: setup.map(\.complete), nothingImported: setup?.nothingImported ?? false,
                                 importing: importing,
                                 importFraction: importer.totalBytes > 0 ? Double(importer.completedBytes) / Double(importer.totalBytes) : nil,
-                                starting: starting)
+                                starting: starting,
+                                campaignSaveAvailable: setup?.campaignSaveAvailable == true && saveSession.controller != nil)
     }
 
     // MARK: Actions
@@ -154,11 +169,11 @@ struct PortalGameView: View {
         sheet = nil
     }
 
-    @MainActor private func play() async {
+    @MainActor private func play(_ intent: PortalCampaignLaunch) async {
         guard engine != 1, !starting, !importing else { return }
         guard abiMatches else { notice = "This build needs its native libraries rebuilt."; return }
         starting = true
-        await refresh("play", start: true)
+        await refresh("play", start: true, intent: intent)
         if !checking { starting = false }
     }
 
@@ -172,7 +187,7 @@ struct PortalGameView: View {
             notice = saves.status
             return
         }
-        await startCheckedContent("play")
+        await startCheckedContent("play", intent: pendingLaunch)
         starting = false
     }
 
@@ -232,7 +247,7 @@ struct PortalGameView: View {
 
     // Runs the content check off the main actor; with `start`, starts the
     // engine only if it passes (p2_vision_game_start enforces the same gate).
-    @MainActor private func refresh(_ trigger: String, start: Bool) async {
+    @MainActor private func refresh(_ trigger: String, start: Bool, intent: PortalCampaignLaunch = .gameMenu) async {
         guard !checking, !importing else { return }
         checking = true
         guard start else {
@@ -243,11 +258,16 @@ struct PortalGameView: View {
         }
         guard let saves = saveSession.controller else {
             notice = saveSession.layoutIssue
-            await startCheckedContent(trigger)
+            if intent == .continueCampaign {
+                checking = false
+                return
+            }
+            await startCheckedContent(trigger, intent: .gameMenu)
             return
         }
         savePlayRequest += 1
         let request = savePlayRequest
+        pendingLaunch = intent
         preparingSaves = true
         let ready = await saves.prepareForPlay()
         guard savePlayRequest == request else { return }
@@ -258,16 +278,17 @@ struct PortalGameView: View {
             notice = saves.status
             return
         }
-        await startCheckedContent(trigger)
+        await startCheckedContent(trigger, intent: intent)
     }
 
-    @MainActor private func startCheckedContent(_ trigger: String) async {
-        let result = await PortalContentSetup.check(trigger, start: true)
+    @MainActor private func startCheckedContent(_ trigger: String, intent: PortalCampaignLaunch) async {
+        let result = await PortalContentSetup.check(trigger, start: true, intent: intent)
         checking = false
         engine = p2_vision_game_state()
         if let result {
             saveSession.controller?.gameplayDidEnd()
             setup = result
+            if result.resumeUnavailable { notice = "No valid campaign save was found. Open Saves to check the available versions." }
             if !result.complete { sheet = .importFiles }
             return
         }
@@ -301,6 +322,8 @@ private struct PortalLibraryControl: View {
 // the Library card and the Game Files sheet. Names are owned file names only.
 struct PortalContentSetup: Equatable, Sendable {
     var complete = false
+    var campaignSaveAvailable = false
+    var resumeUnavailable = false
     var requiredMissing = 0, badDirectories = 0, archives = 0, missingArchives = 0, shortArchives = 0
     // The import's list of every owned file (absent: content copied another
     // way; then the first campaign map stands in for the loose files).
@@ -335,16 +358,21 @@ struct PortalContentSetup: Equatable, Sendable {
 
     // Off the main actor: reads the VPK directory trees and the volume's free
     // space. nil when the engine started (or already runs or returned).
-    static func check(_ trigger: String, start: Bool) async -> PortalContentSetup? {
+    static func check(_ trigger: String, start: Bool, intent: PortalCampaignLaunch = .gameMenu) async -> PortalContentSetup? {
         await Task.detached(priority: .userInitiated) { () -> PortalContentSetup? in
             var report = P2ContentReport()
             if start {
-                if p2_vision_game_start(trigger) == 0 { return nil }
+                let status = p2_vision_game_start(trigger, intent.native)
+                if status == 0 { return nil }
                 _ = p2_vision_content_last(&report)
-            } else {
-                _ = p2_vision_content_check(trigger, &report)
+                var result = PortalContentSetup(report)
+                result.resumeUnavailable = status == -2
+                return result
             }
-            return PortalContentSetup(report)
+            _ = p2_vision_content_check(trigger, &report)
+            var result = PortalContentSetup(report)
+            result.campaignSaveAvailable = result.complete && p2_vision_has_campaign_save() != 0
+            return result
         }.value
     }
 

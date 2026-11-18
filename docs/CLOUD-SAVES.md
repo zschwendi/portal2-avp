@@ -6,10 +6,10 @@ current save if the cloud check is slow. The app can also continue locally when
 iCloud is unavailable. A save restore never runs while Portal 2 owns the save
 directory.
 
-On iPad, **Continue** selects the newest valid campaign save after this check.
-If iCloud restores a campaign onto an iPad with no local save, **Play** can
-resume it directly. **Game Menu** opens the game's menu without choosing a slot.
-On Vision Pro, use the game's Load Game menu after syncing to choose a save.
+On iPad and Vision Pro, **Continue** selects the newest valid campaign save after
+this check. If iCloud restores a campaign onto a device with no local save,
+**Play** can resume it directly. **Game Menu** opens the game's menu so you can
+choose another slot or start a new campaign.
 
 Portal 2 writes to `portal2/save` under the runtime’s existing `--user-dir`.
 The adapter uses existing path casing, including `portal2/SAVE`. It snapshots the

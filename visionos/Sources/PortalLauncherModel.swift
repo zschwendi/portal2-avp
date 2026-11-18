@@ -10,6 +10,7 @@ enum PortalCardState: Equatable, Sendable {
     case needsFiles(incomplete: Bool)   // nothing imported yet, or some files missing
     case importing(fraction: Double?)
     case ready
+    case continueCampaign
     case starting
     case paused                          // the Library is shown over the running game
     case stopped
@@ -17,7 +18,7 @@ enum PortalCardState: Equatable, Sendable {
     // p2_vision_game_state: 0 idle, 1 starting/running, 2 returned, -1 content incomplete.
     // `content`: the last check's verdict (nil: none finished yet).
     static func resolve(engine: Int32, content: Bool?, nothingImported: Bool, importing: Bool,
-                        importFraction: Double?, starting: Bool) -> PortalCardState {
+                        importFraction: Double?, starting: Bool, campaignSaveAvailable: Bool = false) -> PortalCardState {
         switch engine {
         case 1: return .paused
         case 2: return .stopped
@@ -26,7 +27,7 @@ enum PortalCardState: Equatable, Sendable {
         if importing { return .importing(fraction: importFraction) }
         if starting { return .starting }
         switch content {
-        case .some(true): return .ready
+        case .some(true): return campaignSaveAvailable ? .continueCampaign : .ready
         case .some(false): return .needsFiles(incomplete: !nothingImported)
         case .none: return .checking
         }
@@ -37,6 +38,7 @@ enum PortalCardState: Equatable, Sendable {
         case .needsFiles: return .importFiles
         case .importing: return .showProgress
         case .ready: return .play
+        case .continueCampaign: return .continueCampaign
         case .paused: return .resume
         case .stopped: return .explain(Self.stoppedReason)
         case .checking, .starting: return .wait
@@ -50,7 +52,7 @@ enum PortalCardState: Equatable, Sendable {
         case .checking: return "Checking game files"
         case .needsFiles(let incomplete): return incomplete ? "Game files incomplete" : "Game files needed"
         case .importing: return "Importing game files"
-        case .ready: return "Ready to play"
+        case .ready, .continueCampaign: return "Ready to play"
         case .starting: return "Starting"
         case .paused: return "Paused"
         case .stopped: return "Stopped"
@@ -61,7 +63,7 @@ enum PortalCardState: Equatable, Sendable {
         switch self {
         case .checking, .starting, .importing: return "hourglass"
         case .needsFiles: return "tray.and.arrow.down"
-        case .ready: return "checkmark.circle.fill"
+        case .ready, .continueCampaign: return "checkmark.circle.fill"
         case .paused: return "pause.circle.fill"
         case .stopped: return "stop.circle"
         }
@@ -69,13 +71,14 @@ enum PortalCardState: Equatable, Sendable {
 }
 
 enum PortalCardAction: Equatable, Sendable {
-    case importFiles, play, resume, showProgress, wait
+    case importFiles, play, continueCampaign, resume, showProgress, wait
     case explain(String)
 
     var title: String {
         switch self {
         case .importFiles: return "Import"
         case .play: return "Play"
+        case .continueCampaign: return "Continue"
         case .resume: return "Resume"
         case .showProgress: return "Progress"
         case .wait: return "Please wait"
@@ -86,7 +89,7 @@ enum PortalCardAction: Equatable, Sendable {
     var symbolName: String {
         switch self {
         case .importFiles: return "tray.and.arrow.down"
-        case .play: return "play.fill"
+        case .play, .continueCampaign: return "play.fill"
         case .resume: return "playpause.fill"
         case .showProgress: return "list.bullet.rectangle"
         case .wait: return "hourglass"
@@ -96,7 +99,7 @@ enum PortalCardAction: Equatable, Sendable {
 
     var prominent: Bool {
         switch self {
-        case .importFiles, .play, .resume: return true
+        case .importFiles, .play, .continueCampaign, .resume: return true
         case .showProgress, .wait, .explain: return false
         }
     }

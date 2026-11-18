@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
         for (int i = 1; i + 1 < count && strcmp(arguments[i], "--"); ++i) {
             if (!strcmp(arguments[i], "--user-dir")) user = arguments[i + 1];
         }
-        char resume_save[P2_IOS_SAVE_STEM_SIZE] = {0};
+        char resume_save[P2_CAMPAIGN_SAVE_STEM_SIZE] = {0};
         int offer_continue = show_launcher && rt_ios_is_ipad() && count + 2 < 256 &&
                              !has_argument("+load") && !has_argument("--user-dir");
         rt_ios_content_gate(roots[0], roots[1], roots[2], documents, user, show_launcher,

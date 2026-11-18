@@ -59,11 +59,13 @@ do {
 // The card never offers Play for incomplete files, and never Play twice.
 do {
     func card(engine: Int32 = 0, content: Bool? = true, nothing: Bool = false, importing: Bool = false,
-              fraction: Double? = nil, starting: Bool = false) -> PortalCardState {
+              fraction: Double? = nil, starting: Bool = false, hasSave: Bool = false) -> PortalCardState {
         PortalCardState.resolve(engine: engine, content: content, nothingImported: nothing, importing: importing,
-                                importFraction: fraction, starting: starting)
+                                importFraction: fraction, starting: starting, campaignSaveAvailable: hasSave)
     }
     check(card().action == .play, "complete files: Play")
+    check(card(hasSave: true).action == .continueCampaign, "complete files with a verified campaign: Continue")
+    check(card(content: false, hasSave: true).action == .importFiles, "a save never bypasses the content gate")
     check(card(engine: -1, content: false, nothing: true) == .needsFiles(incomplete: false), "nothing imported")
     check(card(engine: -1, content: false).action == .importFiles, "start refused by the gate: Import")
     check(card(content: nil).action == .wait, "before the first check finishes")
@@ -71,6 +73,7 @@ do {
     check(card(content: true, importing: true).action == .showProgress, "an import outranks Play")
     check(card(starting: true).action == .wait, "Play pressed: no second start")
     check(card(engine: 1).action == .resume, "Library over the running game: Resume")
+    check(card(engine: 1, hasSave: true).action == .resume, "running game resumes without reloading its save")
     check(card(engine: 1, importing: true).action == .resume, "never import over a running engine")
     if case .explain = card(engine: 2).action {} else { check(false, "stopped engine explains instead of playing") }
 }

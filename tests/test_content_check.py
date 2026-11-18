@@ -158,16 +158,18 @@ class LauncherGateTests(unittest.TestCase):
 
     def test_visionos_start_requires_complete_content(self):
         source = (ROOT / 'runtime/visionos/game_vision.m').read_text()
-        start = source[source.index('int p2_vision_game_start(const char *trigger) {'):]
+        start = source[source.index('int p2_vision_game_start(const char *trigger, int intent) {'):]
         self.assertLess(start.index('content_check(documents, &report)'), start.index('dispatch_async('))
         self.assertLess(start.index('return atomic_load(&state) == -1 ? -1 : 0;'), start.index('dispatch_async('))
+        self.assertLess(start.index('latest_campaign_save(documents)'), start.index('dispatch_async('))
+        self.assertLess(start.index('return -2;'), start.index('dispatch_async('))
         self.assertNotIn('fileExistsAtPath:[documents stringByAppendingPathComponent:relative]', source)
         self.assertIn('NSURLVolumeAvailableCapacityForImportantUsageKey', source)
         self.assertIn('p2_content_write_status', source)
         view = (ROOT / 'visionos/Sources/PortalGameView.swift').read_text()
         # The view starts the engine only through the gated call, never directly.
         self.assertEqual(view.count('p2_vision_game_start('), 1)
-        self.assertIn('if p2_vision_game_start(trigger) == 0 { return nil }', view)
+        self.assertIn('let status = p2_vision_game_start(trigger, intent.native)', view)
         self.assertNotIn('engine test', view.lower())
         self.assertIn('checkAgain: { Task { await refresh("check-again", start: false) } }', view)
         launcher = (ROOT / 'visionos/Sources/PortalLauncherView.swift').read_text()
