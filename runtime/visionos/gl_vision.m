@@ -43,7 +43,6 @@ typedef struct {
     uint32_t kind, flip_left_y;
     uint64_t xr_session;
     P2XRFrame render_pose;
-    vector_float4 reticle;
 } SurfaceSlot;
 typedef struct {
     EGLDisplay display;
@@ -56,7 +55,6 @@ typedef struct {
     uint32_t pending_kind, pending_flip_left_y;
     uint64_t pending_session;
     P2XRFrame pending_pose;
-    vector_float4 pending_reticle;
 } VisionContext;
 
 static void *gles_library, *egl_library;
@@ -327,14 +325,9 @@ int p2_vision_gl_mark_stereo(uint64_t session, const P2XRFrame *pose, int diagno
     if (!context || (!diagnostic && (!pose || !pose->tracked || !p2_xr_session_active(session)))) return 0;
     context->pending_kind = diagnostic ? P2_VISION_DIAGNOSTIC_STEREO : P2_VISION_TRACKED_STEREO;
     context->pending_session = diagnostic ? 0 : session;
-    context->pending_reticle = (vector_float4){0};
     memset(&context->pending_pose,0,sizeof(context->pending_pose));
     if (!diagnostic) context->pending_pose = *pose;
     return 1;
-}
-void p2_vision_gl_set_reticle(vector_float3 tracking_hit) {
-    if (!host || host->pending_kind != P2_VISION_TRACKED_STEREO) return;
-    host->pending_reticle = (vector_float4){tracking_hit.x, tracking_hit.y, tracking_hit.z, 1};
 }
 static void audit_timing(uint64_t sequence) {
     static int enabled = -1;
@@ -380,9 +373,7 @@ void p2_vision_gl_present(void) {
     cadence.last_ms = now;
     completed->xr_session = context->pending_session;
     completed->render_pose = context->pending_pose;
-    completed->reticle = completed->kind == P2_VISION_TRACKED_STEREO ? context->pending_reticle : (vector_float4){0};
     context->pending_kind = 0; context->pending_session = 0; context->pending_flip_left_y = 0;
-    context->pending_reticle = (vector_float4){0};
     memset(&context->pending_pose,0,sizeof(context->pending_pose));
     context->published = context->writing;
     int next = -1;
@@ -410,7 +401,7 @@ int p2_vision_gl_acquire(P2VisionGLFrame *frame) {
         *frame = (P2VisionGLFrame){.sequence=slot->sequence,.width=(uint32_t)host->width,.height=(uint32_t)host->height,
             .surface=(void *)slot->storage[0],.right_surface=(void *)slot->storage[1],
             .eye_count=slot->kind == P2_VISION_MONO ? 1 : 2,.kind=slot->kind,
-            .xr_session=slot->xr_session,.render_pose=slot->render_pose,.reticle=slot->reticle,
+            .xr_session=slot->xr_session,.render_pose=slot->render_pose,
             .slot=host->published,.flip_left_y=slot->flip_left_y};
     }
     pthread_mutex_unlock(&lock);

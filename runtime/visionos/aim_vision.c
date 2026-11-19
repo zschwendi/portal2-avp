@@ -13,8 +13,8 @@
 //
 // Viewmodel: C_BaseViewModel/C_PredictedViewModel CalcViewModelView (vtable
 // slot 288, audited by tools/visionos_hooks.py) runs unchanged, then the model
-// is placed at the controller with the engine's own SetLocalOrigin/Angles, so
-// head bob, lag and shake never move the gun out of the hand.
+// follows the controller with the engine's own SetLocalOrigin/Angles, so head
+// bob, lag and shake never change the tracked gun pose.
 //
 // Behaviour reference: the unlicensed Portal2VR mod also aims TraceFirePortal
 // and CalcViewModelView from a controller; nothing was copied from it.
@@ -52,10 +52,12 @@ static pthread_once_t settings_once = PTHREAD_ONCE_INIT;
 static int controller_aim, viewmodel_enabled;
 // Stock v_portalgun ACT_VM_IDLE: the right wrist is at (7.29438, -8.18264,
 // -11.34550) in model units. The muzzle attachment defines the bore below.
-// Express the inverse wrist offset in that bore's forward/left/up basis so
-// mapping the bore to Sense aim also places the modeled wrist at Sense grip.
+// Express the inverse wrist offset in that bore's forward/left/up basis. The
+// stock model extends about 25 units past the wrist. Pull the tracked model
+// back 8 units along its bore (~20 cm at the default world scale), preserving
+// the bore line and bringing the muzzle closer without changing either ray.
 static const vector_float3 model_bore = {0.99195305f, 0.09315844f, 0.08573598f};
-static vector_float3 grip_offset = {-5.50067915f, 8.82883667f, 11.86078145f};
+static vector_float3 viewmodel_offset = {-5.50067915f - 8.0f, 8.82883667f, 11.86078145f};
 
 static double monotonic(void) {
     struct timespec now;
@@ -76,13 +78,13 @@ static void read_settings(void) {
         float x, y, z;
         char tail;
         if (sscanf(value, "%f,%f,%f%c", &x, &y, &z, &tail) == 3 && isfinite(x) && isfinite(y) && isfinite(z) &&
-            fabsf(x) <= 40 && fabsf(y) <= 40 && fabsf(z) <= 40) grip_offset = (vector_float3){x, y, z};
+            fabsf(x) <= 40 && fabsf(y) <= 40 && fabsf(z) <= 40) viewmodel_offset = (vector_float3){x, y, z};
         else fprintf(stderr, "[vision-aim] P2_XR_VIEWMODEL_OFFSET=%s rejected (forward,left,up within 40 units)\n", value);
     }
     fprintf(stderr, "[vision-aim] Controller portal aim %s (server profile %d, client prediction %d, viewmodel %d, "
-        "grip offset %.1f,%.1f,%.1f); physical aim unverified\n", controller_aim ? "available" : "off",
+        "viewmodel offset %.1f,%.1f,%.1f); physical aim unverified\n", controller_aim ? "available" : "off",
         P2_XR_PORTAL_AIM_PROFILE, P2_XR_CLIENT_PORTAL_AIM_PROFILE, viewmodel_enabled,
-        grip_offset.x, grip_offset.y, grip_offset.z);
+        viewmodel_offset.x, viewmodel_offset.y, viewmodel_offset.z);
 }
 static void settings(void) { pthread_once(&settings_once, read_settings); }
 
@@ -118,17 +120,18 @@ static int aim_live(P2XRAimBasis *current, P2XRFrame *latest) {
     return aim_for_frame(current, session, latest, &controls);
 }
 
-int p2_vision_aim_reticle(CPU *c, uint64_t session, const P2XRFrame *pose,
-                         const P2XRInput *controls, vector_float3 *tracking_hit) {
+P2VisionAimReticle p2_vision_aim_reticle(CPU *c, uint64_t session, const P2XRFrame *pose,
+                                      const P2XRInput *controls, vector_float3 *tracking_hit) {
     P2XRAimBasis current;
     vector_float3 stock, start, direction, hit;
-    if (!aim_for_frame(&current, session, pose, controls) || !p2_vision_reticle_origin(c, &stock) ||
+    if (!aim_for_frame(&current, session, pose, controls)) return P2_VISION_RETICLE_HEAD;
+    if (!tracking_hit || !p2_vision_reticle_origin(c, &stock) ||
         !p2_xr_aim_ray(&current, pose, stock, current.head, &start, &direction) ||
-        !p2_vision_trace_reticle(c, start, direction, &hit)) return 0;
+        !p2_vision_trace_reticle(c, start, direction, &hit)) return P2_VISION_RETICLE_HIDDEN;
     vector_float4 point = simd_mul(simd_inverse(current.source_from_tracking), (vector_float4){hit.x, hit.y, hit.z, 1});
-    if (!isfinite(point.x) || !isfinite(point.y) || !isfinite(point.z)) return 0;
+    if (!isfinite(point.x) || !isfinite(point.y) || !isfinite(point.z)) return P2_VISION_RETICLE_HIDDEN;
     *tracking_hit = point.xyz;
-    return 1;
+    return P2_VISION_RETICLE_TRACKED;
 }
 // Unused when the profile header disables controller aim.
 __attribute__((unused)) static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
@@ -270,7 +273,7 @@ static int viewmodel_shim(CPU *c, const char *name) {
     P2XRFrame latest;
     P2XRSourceView pose;
     if (!pointer(args[0]) || !pointer(args[2]) || !aim_live(&current, &latest) ||
-        !p2_xr_aim_viewmodel(&current, &latest, read_vector(args[2]), grip_offset, model_bore, &pose)) return 1;
+        !p2_xr_aim_viewmodel(&current, &latest, read_vector(args[2]), viewmodel_offset, model_bore, &pose)) return 1;
     if (!pose_buffer && !(pose_buffer = rt_alloc(24))) return 1;
     write_vector(pose_buffer, pose.origin);
     write_vector(pose_buffer + 12, pose.angles);

@@ -9,9 +9,15 @@
 // p2_vision_aim_clear, stop controller aim until the next publication.
 void p2_vision_aim_publish(uint64_t session, uint64_t sequence, const P2XRBody *body, vector_float3 head_angles);
 void p2_vision_aim_clear(void);
-// Collision point for this specific stereo snapshot, in ARKit tracking space.
-int p2_vision_aim_reticle(CPU *c, uint64_t session, const P2XRFrame *pose,
-                         const P2XRInput *controls, vector_float3 *tracking_hit);
+typedef enum {
+    P2_VISION_RETICLE_HEAD,
+    P2_VISION_RETICLE_HIDDEN,
+    P2_VISION_RETICLE_TRACKED,
+} P2VisionAimReticle;
+// Reticle state for this stereo snapshot. Only TRACKED writes the collision
+// point in ARKit tracking space. HEAD lets the stock HUD draw at its center.
+P2VisionAimReticle p2_vision_aim_reticle(CPU *c, uint64_t session, const P2XRFrame *pose,
+                                      const P2XRInput *controls, vector_float3 *tracking_hit);
 // Guest game thread, with the verified RenderView hook: place the portal gun
 // viewmodel at the controller while controller aim is active (audited
 // client.so CalcViewModelView slot; refuses on any mismatch).

@@ -158,6 +158,16 @@ class OwnedBinaryTests(unittest.TestCase):
         self.assertIn('#define P2_XR_CROSSHAIR_PAINT_COUNT 8', visionos_hooks.header_source(result))
         self.assertFalse(result['runtime_validated'])
 
+    def test_crosshair_profile_refuses_relocated_paint_signatures(self):
+        path = owned_root() / 'portal2/bin/linux32/client.so'
+        old_operands = {b'13CHUDQuickInfo': 'f89b9901', b'11CHUDAutoAim': '1ca29601'}
+        for name, operand in old_operands.items():
+            overlapping = tuple((cls, slot, primary + (operand if cls == name else ''), panel)
+                                for cls, slot, primary, panel in visionos_hooks.CROSSHAIR_PAINT)
+            with self.subTest(name=name), mock.patch.object(visionos_hooks, 'CROSSHAIR_PAINT', overlapping):
+                with self.assertRaisesRegex(ValueError, 'Paint entry signature overlaps an ELF relocation'):
+                    visionos_hooks.audit(path)
+
     def test_owned_engine_profile(self):
         result = visionos_hooks.audit_engine(owned_root() / 'bin/linux32/engine.so')
         self.assertEqual(result['interface'], 'VEngineClient015')

@@ -1,9 +1,19 @@
-"""Check the owned Portal 2 client/engine ABI used by the non-firing reticle."""
+"""Check the owned Portal 2 guest ABI used by the tracked reticle and stock HUD."""
 from pathlib import Path
 import struct
 
 from elfprep import Elf
 from visionos_hooks import SUPPORTED_CLIENT, SUPPORTED_ENGINE, _code, _no_relocation, _sha256, primary_vtable
+
+
+SUPPORTED_SURFACE = 'b1eee93d49c743188d7a8bc9a30345fb0ff6d8a1eec77e5528216999ea64c1cd'
+
+
+def _instruction(module, address, prefix, description):
+    signature = bytes.fromhex(prefix)
+    if _code(module, address, len(signature)) != signature:
+        raise ValueError(f'unexpected {description} at {address:#x}')
+    return signature
 
 
 def audit(linux_root):
@@ -14,18 +24,12 @@ def audit(linux_root):
         raise ValueError('unsupported client or engine revision')
     client, engine = Elf(client_path, 0, 1), Elf(engine_path, 0, 1)
 
-    def instruction(module, address, prefix, description):
-        signature = bytes.fromhex(prefix)
-        if _code(module, address, len(signature)) != signature:
-            raise ValueError(f'unexpected {description} at {address:#x}')
-        return signature
-
     def pointer_operand(address, instruction_prefix, description):
-        signature = instruction(client, address, instruction_prefix, description)
+        signature = _instruction(client, address, instruction_prefix, description)
         return struct.unpack('<I', _code(client, address + len(signature), 4))[0]
 
     def call_target(address):
-        instruction(client, address, 'e8', 'direct call')
+        _instruction(client, address, 'e8', 'direct call')
         return address + 5 + struct.unpack('<i', _code(client, address + 1, 4))[0]
 
     portal_query = call_target(0x8abf87)
@@ -55,7 +59,7 @@ def audit(linux_root):
     }
     signatures = {}
     for name, (module, address, prefix) in code.items():
-        signatures[name] = instruction(module, address, prefix, name)
+        signatures[name] = _instruction(module, address, prefix, name)
         _no_relocation(module, ((address, len(signatures[name])),), name)
     values = {'mask': trace_mask, 'trace_global': trace_global, 'entity_list': entity_list,
               'viewmodel_weapon': weapon_handle, 'viewmodel_owner': owner_handle,
@@ -65,19 +69,68 @@ def audit(linux_root):
     return values, signatures
 
 
+def audit_hud_surface(linux_root):
+    root = Path(linux_root)
+    client_path = root / 'portal2/bin/linux32/client.so'
+    surface_path = root / 'bin/linux32/vguimatsurface.so'
+    if _sha256(client_path) != SUPPORTED_CLIENT or _sha256(surface_path) != SUPPORTED_SURFACE:
+        raise ValueError('unsupported client or VGUI material surface revision')
+    client, surface = Elf(client_path, 0, 1), Elf(surface_path, 0, 1)
+
+    # GetHudSize and CHudTexture::DrawSelf load the same relocated ISurface pointer.
+    _instruction(client, 0xd7ea03, 'a1', 'HUD surface load')
+    _instruction(client, 0xb18af2, '8b15', 'HUD texture surface load')
+    global_rva = client.u32(0xd7ea04)
+    if global_rva != client.u32(0xb18af4):
+        raise ValueError('HUD surface loads disagree')
+
+    table, slots = primary_vtable(surface, b'17CMatSystemSurface', 0x1a0 // 4 + 1)
+    values = {'global_rva': global_rva, 'vtable_rva': table}
+    signatures = {}
+    methods = {
+        'filled_rect': (0x3c, '5589e557565383ec68'),
+        'unicode_char': (0x70, '565383ec348b5c2440807b33007449'),
+        'textured_rect': (0x9c, '57565383ec508b5c2460807b2f00751083c4'),
+        'screen_size': (0xa8, '5589e55383ec148b450880b8800301000074'),
+        'textured_subrect': (0x19c, '57565383ec508b5c2460807b2f00751083c4'),
+        'textured_polygon': (0x1a0, '538b54240c8b5c24088b4c24108b44241485'),
+    }
+    for name, (slot, prefix) in methods.items():
+        address = slots[slot // 4]
+        values[f'{name}_slot'] = slot
+        values[f'{name}_rva'] = address
+        signatures[name] = _instruction(surface, address, prefix, name)
+        _no_relocation(surface, ((address, len(signatures[name])),), name)
+
+    # The five QuickInfo dots use filled rects and its crescent textures use
+    # subrects. Polygons and glyphs also add these fields before clipping.
+    x = _instruction(surface, 0x6fbb8, '8b530c', 'subrect x translation')[-1]
+    y = _instruction(surface, 0x6fbcf, '8b4310', 'subrect y translation')[-1]
+    rect_x = _instruction(surface, 0x72eee, '8b530c', 'filled rect x translation')[-1]
+    rect_y = _instruction(surface, 0x72f0c, '8b4310', 'filled rect y translation')[-1]
+    polygon = _instruction(surface, 0x70fba, 'ff7310ff730c', 'polygon translation')
+    if (x, y) != (rect_x, rect_y) or (x, y) != (polygon[5], polygon[2]):
+        raise ValueError('HUD translation fields disagree')
+    values.update(translate_x=x, translate_y=y)
+    return values, signatures
+
+
 def write_header(path, linux_root):
     path = Path(path)
     lines = ['#pragma once']
-    try:
-        values, signatures = audit(linux_root)
-    except (OSError, ValueError) as error:
-        print(f'[vision-reticle] Reticle disabled: {error}', flush=True)
-        lines += ['#define P2_RETICLE_PROFILE 0']
-    else:
-        lines += ['#define P2_RETICLE_PROFILE 1']
-        lines += [f'#define P2_RETICLE_{name.upper()} 0x{value:x}u' for name, value in values.items()]
+    profiles = (('p2_reticle', 'Reticle collision', audit),
+                ('p2_xr_hud_surface', 'Stock HUD translation', audit_hud_surface))
+    for prefix, description, inspect in profiles:
+        try:
+            values, signatures = inspect(linux_root)
+        except (OSError, ValueError) as error:
+            print(f'[vision-reticle] {description} disabled: {error}', flush=True)
+            lines.append(f'#define {prefix.upper()}_PROFILE 0')
+            continue
+        lines.append(f'#define {prefix.upper()}_PROFILE 1')
+        lines += [f'#define {prefix.upper()}_{name.upper()} 0x{value:x}u' for name, value in values.items()]
         for name, signature in signatures.items():
             literals = ', '.join(f'0x{byte:02x}' for byte in signature)
-            lines.append(f'static const unsigned char p2_reticle_sig_{name}[] = {{{literals}}};')
+            lines.append(f'static const unsigned char {prefix}_sig_{name}[] = {{{literals}}};')
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('\n'.join(lines) + '\n')

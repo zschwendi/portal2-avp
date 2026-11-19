@@ -15,7 +15,7 @@ import re
 import struct
 import tempfile
 
-from elfprep import Elf
+from elfprep import Elf, R_386_NONE
 
 ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_CLIENT = '9dd3792c3a12eeb9bfa6b6befe6340da20820287c9ac06189755515555fa8143'
@@ -23,12 +23,13 @@ RENDER_PREFIX = bytes.fromhex('5589e557565383ec648b45086a008b5d0c')
 # Each guest reticle can paint through the primary HUD table or through the
 # vgui::Panel table at object offset 52, slot 129. QuickInfo draws the Portal
 # placement indicator, and AutoAim draws the fixed or active aim reticles.
-# The primary Paint index varies by class.
+# The primary Paint index varies by class. QuickInfo and AutoAim prefixes
+# end just before the relocated absolute address in their first global load.
 CROSSHAIR_PAINT = (
     (b'13CHudCrosshair', 23, '5557565381ec1c0100008b9c2430010000', '836c240434e916f7ffff'),
     (b'19CHudPortalCrosshair', 23, '5383ec088b5c24108b838c01000085c0', '5383ec088b5c24108b835801000085c0'),
-    (b'13CHUDQuickInfo', 22, '5589e557565381ec2c0200008b1df89b9901', '836c240434e916f0ffff'),
-    (b'11CHUDAutoAim', 24, '5557565383ec6ca11ca296018b9c2480000000', '836c240434e976fcffff'),
+    (b'13CHUDQuickInfo', 22, '5589e557565381ec2c0200008b1d', '836c240434e916f0ffff'),
+    (b'11CHUDAutoAim', 24, '5557565383ec6ca1', '836c240434e976fcffff'),
 )
 SUPPORTED_ENGINE = '3bdd4bf75ed7e03e7795dc0ad12128ad7549852b5f15053e9d54a164df74a199'
 ENGINE_CLIENT_INTERFACE = 'VEngineClient015'
@@ -151,6 +152,7 @@ def audit(path):
     if elf.data[offset:offset + len(RENDER_PREFIX)] != RENDER_PREFIX:
         raise ValueError('RenderView entry signature mismatch')
     crosshair = []
+    relocations = {address for address, kind, _ in elf.rels() if kind != R_386_NONE}
     for name, primary_slot, primary_signature, panel_signature in CROSSHAIR_PAINT:
         for object_offset, slot, signature in ((0, primary_slot, primary_signature), (52, 129, panel_signature)):
             vtable, (paint,) = _vtable(elf, name, object_offset, (slot,))
@@ -158,6 +160,9 @@ def audit(path):
             expected = bytes.fromhex(signature)
             if elf.data[start:start + len(expected)] != expected:
                 raise ValueError(f'{name.decode()} Paint entry signature mismatch at object offset {object_offset}')
+            # The runtime compares the loaded bytes, and i386 relocations write four bytes.
+            if any(address in relocations for address in range(paint - 3, paint + len(expected))):
+                raise ValueError(f'{name.decode()} Paint entry signature overlaps an ELF relocation')
             crosshair.append(dict(slot_rva=vtable + 4 * slot, paint_rva=paint, signature=signature))
     return dict(client_sha256=digest, vtable_rva=table, render_view_slot=6,
                 render_view_rva=render, signature=RENDER_PREFIX.hex(),

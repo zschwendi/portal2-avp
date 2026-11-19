@@ -22,7 +22,6 @@ int p2_vision_gl_begin_eye(uint32_t eye);
 int p2_vision_gl_end_eye(uint32_t eye);
 int p2_vision_gl_capture_target(uint32_t eye);
 int p2_vision_gl_mark_stereo(uint64_t session, const P2XRFrame *pose, int diagnostic);
-void p2_vision_gl_set_reticle(vector_float3 tracking_hit);
 // Engine (producer) thread only. Nonzero when the producer EGL context is
 // current on the calling thread, i.e. the engine's render thread.
 int p2_vision_gl_on_producer_thread(void);

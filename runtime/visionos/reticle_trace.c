@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#if P2_RETICLE_PROFILE || P2_XR_HUD_SURFACE_PROFILE
+static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 0x10000; }
+#endif
+
 #if P2_RETICLE_PROFILE
 enum {
     RAY_SIZE = 0x50, RAY_DELTA = 0x10, RAY_FLAGS = 0x44,
@@ -23,7 +27,6 @@ static uint32_t weapon_handle = UINT32_MAX, owner_handle = UINT32_MAX;
 static uint32_t client_base, ray, filter, segments, position;
 static int validated = 0;
 
-static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 0x10000; }
 static int finite_vector(vector_float3 v) { return isfinite(v.x) && isfinite(v.y) && isfinite(v.z); }
 
 static float read_float(uint32_t address) {
@@ -195,6 +198,41 @@ int p2_vision_trace_reticle(CPU *c, vector_float3 start, vector_float3 direction
     return 1;
 #else
     (void)c; (void)start; (void)direction; (void)hit;
+    return 0;
+#endif
+}
+
+uint32_t p2_vision_reticle_surface(CPU *c) {
+#if P2_XR_HUD_SURFACE_PROFILE
+    static uint32_t global, vtable;
+    static int mismatched;
+    if (!c || mismatched) return 0;
+    if (!global) {
+        const GuestModule *client = rt_find_module("client.so");
+        const GuestModule *surface_module = rt_find_module("vguimatsurface.so");
+        if (!client || !surface_module) return 0;
+        const uint32_t base = surface_module->base;
+        const uint32_t table = base + P2_XR_HUD_SURFACE_VTABLE_RVA;
+#define HUD_METHOD(method, signature) \
+        (R32(table + P2_XR_HUD_SURFACE_##method##_SLOT) == base + P2_XR_HUD_SURFACE_##method##_RVA && \
+         !memcmp(rt_span(c, base + P2_XR_HUD_SURFACE_##method##_RVA, sizeof(p2_xr_hud_surface_sig_##signature)), \
+                 p2_xr_hud_surface_sig_##signature, sizeof(p2_xr_hud_surface_sig_##signature)))
+        if (!HUD_METHOD(FILLED_RECT, filled_rect) || !HUD_METHOD(UNICODE_CHAR, unicode_char) ||
+            !HUD_METHOD(TEXTURED_RECT, textured_rect) ||
+            !HUD_METHOD(SCREEN_SIZE, screen_size) || !HUD_METHOD(TEXTURED_SUBRECT, textured_subrect) ||
+            !HUD_METHOD(TEXTURED_POLYGON, textured_polygon)) {
+            mismatched = 1;
+            fprintf(stderr, "[vision-reticle] Guest HUD surface profile mismatch\n");
+            return 0;
+        }
+#undef HUD_METHOD
+        global = client->base + P2_XR_HUD_SURFACE_GLOBAL_RVA;
+        vtable = table;
+    }
+    const uint32_t surface = R32(global);
+    return pointer(surface) && R32(surface) == vtable ? surface : 0;
+#else
+    (void)c;
     return 0;
 #endif
 }

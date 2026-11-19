@@ -9,7 +9,9 @@
 #include "view_vision.h"
 #include "aim_vision.h"
 #include "gl_vision.h"
+#include "reticle_trace.h"
 #include "../../build/visionos/xr-profile.h"
+#include "../../build/visionos/xr-reticle-profile.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,8 +31,10 @@ static P2XRBody body;
 static float previous_yaw;
 static unsigned stereo_frames;
 static uint32_t previous_buttons;
-static uint32_t crosshair_base, skip_crosshair_paint;
-static int crosshair_hidden;
+static struct {
+    P2VisionAimReticle mode;
+    int32_t x, y;
+} crosshair;
 static float units_per_meter = P2_XR_UNITS_PER_METER, snap_degrees = 45, smooth_rate = P2_XR_117_SMOOTH_RATE;
 void rt_ios_game_state_poll(void);
 int rt_ios_game_ui_visible(void);
@@ -42,51 +46,103 @@ static void put_vector(uint32_t address, unsigned offset, vector_float3 value) {
 }
 static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
 
-// The reticle is guest HUD paint, independent of camera tracking and portal
-// aim. Replace the reticle HUD classes' Paint entries while XR presents.
-// VGUI can paint after RenderView returns, so this uses session ownership.
-static int skip_paint(CPU *c, const char *name) {
-    if (strcmp(name, "__p2_vision_skip_crosshair_paint")) return 0;
-    static int reported;
-    if (!reported) {
-        reported = 1;
-        fprintf(stderr, "[vision-view] Skipped guest reticle paint for immersive presentation\n");
+#if P2_XR_CROSSHAIR_PAINT_COUNT && P2_XR_HUD_SURFACE_PROFILE
+static const char crosshair_import[] = "__p2_vision_crosshair_paint_";
+static uint32_t crosshair_paint[P2_XR_CROSSHAIR_PAINT_COUNT];
+static uint32_t crosshair_replacement[P2_XR_CROSSHAIR_PAINT_COUNT];
+static uint32_t crosshair_base;
+static int crosshair_hooked;
+static int crosshair_painting;
+
+// Offset just the stock reticle's VGUI paint. Its sprites, colors, animation
+// and visibility still come from the guest. VGUI resets the surface origin
+// per panel; restore it before any unrelated panel paints.
+static int paint_crosshair(CPU *c, const char *name) {
+    if (strncmp(name, crosshair_import, sizeof(crosshair_import) - 1)) return 0;
+    const char *suffix = name + sizeof(crosshair_import) - 1;
+    unsigned index = (unsigned)(suffix[0] - '0');
+    if (index >= P2_XR_CROSSHAIR_PAINT_COUNT) return 0;
+    if (suffix[1]) return 0;
+    uint32_t args[] = {R32(c->esp + 4)};
+    if (crosshair.mode == P2_VISION_RETICLE_HIDDEN) {
+        c->eax = 0;
+        return 1;
     }
-    c->eax = 0;
+    uint32_t surface = crosshair.mode == P2_VISION_RETICLE_TRACKED && !crosshair_painting ?
+        p2_vision_reticle_surface(c) : 0;
+    if (!surface) {
+        c->eax = rt_invoke(c, crosshair_paint[index], args, 1);
+        return 1;
+    }
+    uint32_t x = surface + P2_XR_HUD_SURFACE_TRANSLATE_X, y = surface + P2_XR_HUD_SURFACE_TRANSLATE_Y;
+    uint32_t old_x = R32(x), old_y = R32(y);
+    W32(x, old_x + (uint32_t)crosshair.x);
+    W32(y, old_y + (uint32_t)crosshair.y);
+    crosshair_painting = 1;
+    c->eax = rt_invoke(c, crosshair_paint[index], args, 1);
+    crosshair_painting = 0;
+    W32(x, old_x);
+    W32(y, old_y);
+    static unsigned reported;
+    if (reported < P2_XR_CROSSHAIR_PAINT_COUNT * 4) {
+        ++reported;
+        fprintf(stderr, "[vision-view] Translated stock reticle Paint[%u] by (%d,%d)\n", index, crosshair.x, crosshair.y);
+    }
     return 1;
 }
-RT_SHIM_PROVIDER(skip_paint)
+RT_SHIM_PROVIDER(paint_crosshair)
+#endif
 
 static void resolve_crosshair_paint(CPU *c, uint32_t base) {
-#if P2_XR_CROSSHAIR_PAINT_COUNT
+#if P2_XR_CROSSHAIR_PAINT_COUNT && P2_XR_HUD_SURFACE_PROFILE
+    _Static_assert(P2_XR_CROSSHAIR_PAINT_COUNT <= 10, "reticle import indices must be single digits");
     for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i) {
         uint32_t paint = base + p2_xr_crosshair_paint[i].paint;
         uint32_t size = p2_xr_crosshair_paint[i].length;
         if (R32(base + p2_xr_crosshair_paint[i].slot) != paint ||
             memcmp(rt_span(c, paint, size), p2_xr_crosshair_paint[i].signature, size)) {
-            fprintf(stderr, "[vision-view] Guest reticle suppression unavailable: Paint profile mismatch\n");
+            fprintf(stderr, "[vision-view] Stock reticle placement unavailable: Paint[%u] profile mismatch\n", i);
             return;
         }
+        char name[sizeof(crosshair_import) + 1];
+        snprintf(name, sizeof(name), "%s%u", crosshair_import, i);
+        crosshair_replacement[i] = rt_dynamic_import(name);
+        if (!crosshair_replacement[i]) return;
+        crosshair_paint[i] = paint;
     }
-    skip_crosshair_paint = rt_dynamic_import("__p2_vision_skip_crosshair_paint");
     crosshair_base = base;
+    fprintf(stderr, "[vision-view] Validated %u stock reticle Paint hooks\n", P2_XR_CROSSHAIR_PAINT_COUNT);
 #else
     (void)c;
     (void)base;
 #endif
 }
 
-static void hide_crosshair(int hidden) {
-#if P2_XR_CROSSHAIR_PAINT_COUNT
-    if (!skip_crosshair_paint || hidden == crosshair_hidden) return;
-    for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i) {
+static void set_crosshair_hooks(int hooked) {
+#if P2_XR_CROSSHAIR_PAINT_COUNT && P2_XR_HUD_SURFACE_PROFILE
+    if (!crosshair_base || hooked == crosshair_hooked) return;
+    for (unsigned i = 0; i < P2_XR_CROSSHAIR_PAINT_COUNT; ++i)
         W32(crosshair_base + p2_xr_crosshair_paint[i].slot,
-            hidden ? skip_crosshair_paint : crosshair_base + p2_xr_crosshair_paint[i].paint);
-    }
-    crosshair_hidden = hidden;
+            hooked ? crosshair_replacement[i] : crosshair_paint[i]);
+    crosshair_hooked = hooked;
 #else
-    (void)hidden;
+    (void)hooked;
 #endif
+}
+
+static void place_crosshair(const P2XRFrame *pose, unsigned eye, matrix_float4x4 projection,
+                            vector_float3 hit, int width, int height) {
+    matrix_float4x4 tracking_from_eye = simd_mul(pose->tracking_from_head, pose->eyes[eye].head_from_eye);
+    vector_float4 eye_hit = simd_mul(simd_inverse(tracking_from_eye), (vector_float4){hit.x, hit.y, hit.z, 1});
+    vector_float4 clip = simd_mul(projection, eye_hit);
+    // The captured Source camera clips at two Source units, irrespective of
+    // the compositor's depth range. VGUI pixels run down from the top edge.
+    if (!(clip.w > 2 / units_per_meter) || !(fabsf(clip.x) <= clip.w && fabsf(clip.y) <= clip.w)) {
+        crosshair.mode = P2_VISION_RETICLE_HIDDEN;
+        return;
+    }
+    crosshair.x = (int32_t)lroundf((clip.x / clip.w) * width * 0.5f);
+    crosshair.y = (int32_t)lroundf((-clip.y / clip.w) * height * 0.5f);
 }
 
 // ---- Seated head aim --------------------------------------------------------
@@ -303,6 +359,9 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     memcpy(hud,rt_span(c,original_args[2],sizeof(hud)),sizeof(hud));
     matrix_float4x4 cover[2] = {matrix_identity_float4x4,matrix_identity_float4x4};
     float aspect = (float)width / (float)height;
+    vector_float3 tracking_hit;
+    P2VisionAimReticle reticle = session ? p2_vision_aim_reticle(c, session, &pose, &controls, &tracking_hit) :
+        P2_VISION_RETICLE_HEAD;
     rendering = 1;
     for (unsigned eye = 0; eye < 2; ++eye) {
         memcpy(GPTR(eye_views[eye]),camera,sizeof(camera));
@@ -344,15 +403,13 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
             }
         }
         if (p2_vision_gl_begin_eye(eye)) goto mono;
+        crosshair.mode = reticle;
+        if (reticle == P2_VISION_RETICLE_TRACKED) place_crosshair(&pose, eye, cover[eye], tracking_hit, width, height);
         uint32_t args[5]; memcpy(args,original_args,sizeof(args));
         args[1] = eye_views[eye]; args[2] = eye_hud[eye];
         c->eax = rt_invoke(c,original,args,5);
         if (p2_vision_gl_end_eye(eye)) goto mono;
     }
-    vector_float3 tracking_hit;
-    uint32_t result = c->eax;
-    int has_reticle = session && p2_vision_aim_reticle(c, session, &pose, &controls, &tracking_hit);
-    c->eax = result;
     // Publish the projection each image was rendered with; the compositor
     // crops it with sourceProj * inverse(currentProj).
     for (unsigned eye = 0; session && eye < 2; ++eye) {
@@ -369,7 +426,6 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // the captured left image is complete. Mono fallback must restore eye 0.
     int marked = p2_vision_gl_mark_stereo(session,session ? &pose : NULL,diagnostic);
     if (!marked) goto mono;
-    if (has_reticle) p2_vision_gl_set_reticle(tracking_hit);
     rendering = 0;
     if (marked && ++stereo_frames <= 3)
         fprintf(stderr,"[vision-view] Stereo pair #%u rendered: session=%llu pose=%llu diagnostic=%d head_aim=%d; physical gameplay unverified\n",
@@ -377,6 +433,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
             session && aim_session == session);
     return marked;
 mono:
+    crosshair.mode = P2_VISION_RETICLE_HEAD;
     rendering = 0;
     p2_vision_gl_begin_eye(0);
     return 0;
@@ -442,6 +499,7 @@ static float field(const unsigned char *view, size_t offset) {
 
 static int audit_render(CPU *c, const char *name) {
     if (strcmp(name, "__p2_vision_render_view_audit")) return 0;
+    if (!rendering) crosshair.mode = P2_VISION_RETICLE_HEAD;
     uint32_t args[5];
     for (unsigned i = 0; i < 5; ++i) args[i] = R32(c->esp + 4 + i * 4);
     const unsigned char *view = rt_span(c, args[1], P2_XR_VIEW_SETUP_SIZE);
@@ -523,7 +581,8 @@ void p2_vision_view_poll(void) {
         // Pass-through until the tracked controller aims (aim_vision.c).
         p2_vision_viewmodel_install(c);
     }
-    hide_crosshair(installed && !failed && immersive);
+    if (!immersive || failed) crosshair.mode = P2_VISION_RETICLE_HEAD;
+    set_crosshair_hooks(installed && !failed && immersive);
     aim_poll();
 }
 #endif

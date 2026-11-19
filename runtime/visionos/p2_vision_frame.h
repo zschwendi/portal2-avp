@@ -18,8 +18,6 @@ typedef struct {
     // eyes[].projection replaced by the symmetric cover each image was
     // actually rendered with (crop: sourceProj * inverse(currentProj)).
     P2XRFrame render_pose;
-    // Collision point in ARKit tracking space, in meters. w is zero without a hit.
-    vector_float4 reticle;
     int32_t slot;
     // The left image was copied before the engine's final Y-reversing Present.
     uint32_t flip_left_y;
