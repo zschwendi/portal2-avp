@@ -43,7 +43,7 @@ static void put_vector(uint32_t address, unsigned offset, vector_float3 value) {
 static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
 
 // The reticle is guest HUD paint, independent of camera tracking and portal
-// aim. Replace only its two HUD classes' Paint entries while XR presents.
+// aim. Replace the reticle HUD classes' Paint entries while XR presents.
 // VGUI can paint after RenderView returns, so this uses session ownership.
 static int skip_paint(CPU *c, const char *name) {
     if (strcmp(name, "__p2_vision_skip_crosshair_paint")) return 0;
@@ -349,6 +349,10 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
         c->eax = rt_invoke(c,original,args,5);
         if (p2_vision_gl_end_eye(eye)) goto mono;
     }
+    vector_float3 tracking_hit;
+    uint32_t result = c->eax;
+    int has_reticle = session && p2_vision_aim_reticle(c, session, &pose, &controls, &tracking_hit);
+    c->eax = result;
     // Publish the projection each image was rendered with; the compositor
     // crops it with sourceProj * inverse(currentProj).
     for (unsigned eye = 0; session && eye < 2; ++eye) {
@@ -365,6 +369,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // the captured left image is complete. Mono fallback must restore eye 0.
     int marked = p2_vision_gl_mark_stereo(session,session ? &pose : NULL,diagnostic);
     if (!marked) goto mono;
+    if (has_reticle) p2_vision_gl_set_reticle(tracking_hit);
     rendering = 0;
     if (marked && ++stereo_frames <= 3)
         fprintf(stderr,"[vision-view] Stereo pair #%u rendered: session=%llu pose=%llu diagnostic=%d head_aim=%d; physical gameplay unverified\n",

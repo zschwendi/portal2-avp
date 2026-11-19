@@ -487,20 +487,29 @@ int p2_xr_aim_ray(const P2XRAimBasis *basis, const P2XRFrame *latest,
     return 1;
 }
 int p2_xr_aim_viewmodel(const P2XRAimBasis *basis, const P2XRFrame *latest, vector_float3 eye,
-                        vector_float3 grip_offset, P2XRSourceView *pose) {
-    if (!basis || !pose || !finite_vector(eye) || !finite_vector(grip_offset) || !valid_frame(latest) ||
+                        vector_float3 grip_offset, vector_float3 model_bore, P2XRSourceView *pose) {
+    if (!basis || !pose || !finite_vector(eye) || !finite_vector(grip_offset) || !finite_vector(model_bore) ||
+        hypotf(model_bore.x, model_bore.y) < 1e-5f || !valid_frame(latest) ||
         !latest->controllers[P2_XR_AIM_HAND].tracked || !invertible(basis->source_from_tracking) ||
         !finite_vector(basis->eye)) return 0;
     const P2XRControllerPose *hand = &latest->controllers[P2_XR_AIM_HAND];
     matrix_float4x4 aim = simd_mul(basis->source_from_tracking, hand->tracking_from_aim);
     vector_float3 grip = simd_mul(basis->source_from_tracking, hand->tracking_from_grip.columns[3]).xyz;
     // Apple -Z forward, -X left (Source +Y), +Y up, scaled to Source units.
-    vector_float3 forward = simd_normalize(-aim.columns[2].xyz), left = simd_normalize(-aim.columns[0].xyz),
-        up = simd_normalize(aim.columns[1].xyz);
+    matrix_float3x3 source_from_aim = {{simd_normalize(-aim.columns[2].xyz), simd_normalize(-aim.columns[0].xyz),
+                                       simd_normalize(aim.columns[1].xyz)}};
+    vector_float3 bore = simd_normalize(model_bore);
+    vector_float3 bore_left = simd_normalize(simd_cross((vector_float3){0, 0, 1}, bore));
+    matrix_float3x3 model_from_bore = {{bore, bore_left, simd_cross(bore, bore_left)}};
+    matrix_float3x3 source_from_model = simd_mul(source_from_aim, simd_transpose(model_from_bore));
+    matrix_float4x4 model = aim;
+    model.columns[0].xyz = -source_from_model.columns[1];
+    model.columns[1].xyz = source_from_model.columns[2];
+    model.columns[2].xyz = -source_from_model.columns[0];
     P2XRSourceView view;
-    source_pose(aim, &view);
+    source_pose(model, &view);
     // The basis follows the eye of the last render; carry it to this eye.
-    view.origin = eye + (grip - basis->eye) + forward * grip_offset.x + left * grip_offset.y + up * grip_offset.z;
+    view.origin = eye + (grip - basis->eye) + simd_mul(source_from_aim, grip_offset);
     if (!finite_vector(view.origin) || !finite_vector(view.angles)) return 0;
     view.projection = matrix_identity_float4x4;
     *pose = view;

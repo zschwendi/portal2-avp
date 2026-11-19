@@ -45,3 +45,18 @@ fragment float4 p2_menu_fragment(GameRaster input [[stage_in]],texture2d<float> 
     constexpr sampler sample(filter::linear,address::clamp_to_edge);
     return float4(source.sample(sample, input.uv).rgb, 1);
 }
+
+vertex GameRaster p2_reticle_vertex(uint id [[vertex_id]],
+    constant float4 &center [[buffer(1)]], constant float2 &radius [[buffer(2)]]) {
+    const float2 corners[6] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    float2 uv = corners[id];
+    return {center + float4(uv * radius * center.w, 0, 0), uv};
+}
+
+fragment float4 p2_reticle_fragment(GameRaster input [[stage_in]]) {
+    float distance = length(input.uv);
+    float feather = max(fwidth(distance) * 0.5, 0.04);
+    float edge = 1 - smoothstep(0.80 - feather, 0.80 + feather, distance);
+    float dot = 1 - smoothstep(0.47 - feather, 0.47 + feather, distance);
+    return float4(float3(mix(0.015, 1.0, dot) * edge), edge);
+}

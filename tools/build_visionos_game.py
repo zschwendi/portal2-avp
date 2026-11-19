@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import build_game
 import visionos_hooks
+import visionos_reticle
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,6 +43,7 @@ def main():
     profile, engine = visionos_hooks.profile(config['linux_root'])
     aim = visionos_hooks.aim_profile(config['linux_root'])
     visionos_hooks.write_header(ROOT / 'build/visionos/xr-profile.h', profile, engine, aim)
+    visionos_reticle.write_header(ROOT / 'build/visionos/xr-reticle-profile.h', config['linux_root'])
     base = ['-target',triple,'-isysroot',sdk]
     runtime = [*base,'-O2','-g',*build_game.WARNINGS,'-DRT_FAST_MEMORY','-DP2_VISION_GAME=1','-Iruntime','-Iruntime/ios',
                '-Iruntime/visionos','-I' + str(prefix / 'include'),

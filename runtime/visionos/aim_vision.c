@@ -24,6 +24,7 @@
 #if TARGET_OS_VISION
 #include "modules.h"
 #include "aim_vision.h"
+#include "reticle_trace.h"
 #include "view_vision.h"
 #include "../../build/visionos/xr-profile.h"
 #include <math.h>
@@ -49,12 +50,12 @@ static pthread_mutex_t basis_lock = PTHREAD_MUTEX_INITIALIZER;
 static P2XRAimBasis basis;
 static pthread_once_t settings_once = PTHREAD_ONCE_INIT;
 static int controller_aim, viewmodel_enabled;
-// Viewmodel origin relative to the grip, in the aim frame (forward, left, up),
-// Source units. Starting point, not a calibration: Portal 2 starts its shot
-// effect 30 forward, 4 right and 8 below the eye, and the owned v_portalgun
-// hand bone sits ~25 units behind its muzzle, so the gun's hand is near
-// (5, -5, -9) from the viewmodel origin. P2_XR_VIEWMODEL_OFFSET overrides it.
-static vector_float3 grip_offset = {-5, 5, 9};
+// Stock v_portalgun ACT_VM_IDLE: the right wrist is at (7.29438, -8.18264,
+// -11.34550) in model units. The muzzle attachment defines the bore below.
+// Express the inverse wrist offset in that bore's forward/left/up basis so
+// mapping the bore to Sense aim also places the modeled wrist at Sense grip.
+static const vector_float3 model_bore = {0.99195305f, 0.09315844f, 0.08573598f};
+static vector_float3 grip_offset = {-5.50067915f, 8.82883667f, 11.86078145f};
 
 static double monotonic(void) {
     struct timespec now;
@@ -101,16 +102,33 @@ void p2_vision_aim_clear(void) {
 // Everything a controller shot or viewmodel needs: audited profile, Sense
 // pair owning input, current tracked session with the right controller
 // tracked, head aim recent, game UI hidden.
-static int aim_live(P2XRAimBasis *current, P2XRFrame *latest) {
+static int aim_for_frame(P2XRAimBasis *current, uint64_t session,
+                         const P2XRFrame *frame, const P2XRInput *controls) {
     settings();
-    if (!controller_aim) return 0;
-    P2XRInput controls;
-    uint64_t session = p2_xr_read_latest(latest, &controls);
-    if (!session || !controls.spatial || !controls.connected || rt_ios_game_ui_visible_shared()) return 0;
+    if (!controller_aim || !session || !controls->spatial || !controls->connected ||
+        rt_ios_game_ui_visible_shared()) return 0;
     pthread_mutex_lock(&basis_lock);
     *current = basis;
     pthread_mutex_unlock(&basis_lock);
-    return p2_xr_aim_fresh(current, session, latest, monotonic());
+    return p2_xr_aim_fresh(current, session, frame, monotonic());
+}
+static int aim_live(P2XRAimBasis *current, P2XRFrame *latest) {
+    P2XRInput controls;
+    uint64_t session = p2_xr_read_latest(latest, &controls);
+    return aim_for_frame(current, session, latest, &controls);
+}
+
+int p2_vision_aim_reticle(CPU *c, uint64_t session, const P2XRFrame *pose,
+                         const P2XRInput *controls, vector_float3 *tracking_hit) {
+    P2XRAimBasis current;
+    vector_float3 stock, start, direction, hit;
+    if (!aim_for_frame(&current, session, pose, controls) || !p2_vision_reticle_origin(c, &stock) ||
+        !p2_xr_aim_ray(&current, pose, stock, current.head, &start, &direction) ||
+        !p2_vision_trace_reticle(c, start, direction, &hit)) return 0;
+    vector_float4 point = simd_mul(simd_inverse(current.source_from_tracking), (vector_float4){hit.x, hit.y, hit.z, 1});
+    if (!isfinite(point.x) || !isfinite(point.y) || !isfinite(point.z)) return 0;
+    *tracking_hit = point.xyz;
+    return 1;
 }
 // Unused when the profile header disables controller aim.
 __attribute__((unused)) static int pointer(uint32_t address) { return address >= 0x10000 && address < RT_IMPORT_BASE - 128; }
@@ -247,11 +265,12 @@ static int viewmodel_shim(CPU *c, const char *name) {
     uint32_t args[4];
     for (unsigned i = 0; i < 4; ++i) args[i] = R32(c->esp + 4 + i * 4);
     rt_invoke(c, view_original, args, 4);
+    p2_vision_reticle_weapon(c, args[0], args[1]);
     P2XRAimBasis current;
     P2XRFrame latest;
     P2XRSourceView pose;
     if (!pointer(args[0]) || !pointer(args[2]) || !aim_live(&current, &latest) ||
-        !p2_xr_aim_viewmodel(&current, &latest, read_vector(args[2]), grip_offset, &pose)) return 1;
+        !p2_xr_aim_viewmodel(&current, &latest, read_vector(args[2]), grip_offset, model_bore, &pose)) return 1;
     if (!pose_buffer && !(pose_buffer = rt_alloc(24))) return 1;
     write_vector(pose_buffer, pose.origin);
     write_vector(pose_buffer + 12, pose.angles);

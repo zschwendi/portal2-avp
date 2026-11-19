@@ -199,9 +199,9 @@ int p2_xr_aim_ray(const P2XRAimBasis *basis, const P2XRFrame *latest,
                   vector_float3 *start, vector_float3 *direction);
 // Viewmodel pose for the current engine eye: the grip position plus
 // grip_offset (forward, left, up in the controller's aim frame, Source
-// units), oriented like the aim ray including roll.
+// units), with the model-local bore aligned to that aim including controller roll.
 int p2_xr_aim_viewmodel(const P2XRAimBasis *basis, const P2XRFrame *latest, vector_float3 eye,
-                        vector_float3 grip_offset, P2XRSourceView *pose);
+                        vector_float3 grip_offset, vector_float3 model_bore, P2XRSourceView *pose);
 
 #ifdef __cplusplus
 }

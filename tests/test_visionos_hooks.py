@@ -149,9 +149,13 @@ class OwnedBinaryTests(unittest.TestCase):
     def test_owned_client_profile_unchanged(self):
         result = visionos_hooks.audit(owned_root() / 'portal2/bin/linux32/client.so')
         self.assertEqual((result['vtable_rva'], result['render_view_rva']), (0x142c5a0, 0xda6230))
-        self.assertEqual([entry['paint_rva'] for entry in result['crosshair']],
-                         [0xb382c0, 0xb38ba0, 0xbdc210, 0xbdc240])
-        self.assertEqual(len({entry['slot_rva'] for entry in result['crosshair']}), 4)
+        self.assertEqual([(entry['slot_rva'], entry['paint_rva']) for entry in result['crosshair']], [
+            (0x12bef0c, 0xb382c0), (0x12bf190, 0xb38ba0),  # CHudCrosshair
+            (0x12e7c74, 0xbdc210), (0x12e7ef8, 0xbdc240),  # CHudPortalCrosshair
+            (0x12e5890, 0xbc5e20), (0x12e5b18, 0xbc6e00),  # CHUDQuickInfo
+            (0x12b3be8, 0xb14650), (0x12b3e6c, 0xb149d0),  # CHUDAutoAim
+        ])
+        self.assertIn('#define P2_XR_CROSSHAIR_PAINT_COUNT 8', visionos_hooks.header_source(result))
         self.assertFalse(result['runtime_validated'])
 
     def test_owned_engine_profile(self):

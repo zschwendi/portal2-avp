@@ -537,15 +537,34 @@ static void controller_aim(void) {
     assert(p2_xr_aim_basis(&basis, 7, 1, 10, &body, (vector_float3){0, 0, 0}));
     P2XRSourceView gun;
     vector_float3 moved = eye + (vector_float3){10, 0, 0}, grip = {-5, 5, 9};
+    vector_float3 straight = {1, 0, 0};
     vector_float3 forward = {cosf((float)M_PI / 6), sinf((float)M_PI / 6), 0}, left = {-sinf((float)M_PI / 6), cosf((float)M_PI / 6), 0};
-    assert(p2_xr_aim_viewmodel(&basis, &f, moved, grip, &gun));
+    assert(p2_xr_aim_viewmodel(&basis, &f, moved, grip, straight, &gun));
     near3(gun.origin, moved + (vector_float3){0.2f * m, -0.3f * m, -0.3f * m} + forward * -5 + left * 5 + (vector_float3){0, 0, 9});
     near(gun.angles.x, 0); near(gun.angles.y, 30); near(gun.angles.z, 0);
     P2XRFrame rolled = controller(head(0, 0, seat), (vector_float3){0.3f, 0.9f, -0.2f}, 30, -20);
-    assert(p2_xr_aim_viewmodel(&basis, &rolled, moved, (vector_float3){0, 0, 0}, &gun));
+    assert(p2_xr_aim_viewmodel(&basis, &rolled, moved, (vector_float3){0, 0, 0}, straight, &gun));
     near(gun.angles.y, 30); near(gun.angles.z, 20); // right side down: positive Source roll
-    assert(!p2_xr_aim_viewmodel(&basis, &later, moved, grip, &gun));
-    assert(!p2_xr_aim_viewmodel(&basis, &f, (vector_float3){NAN, 0, 0}, grip, &gun));
+    assert(!p2_xr_aim_viewmodel(&basis, &later, moved, grip, straight, &gun));
+    assert(!p2_xr_aim_viewmodel(&basis, &f, (vector_float3){NAN, 0, 0}, grip, straight, &gun));
+
+    // Distinct aim and grip poses, the stock idle wrist and the measured bore.
+    rolled.controllers[P2_XR_AIM_HAND].tracking_from_grip.columns[3] += (vector_float4){0.03f, 0.02f, 0.04f, 0};
+    vector_float3 wrist = {7.29437650f, -8.18264054f, -11.34550264f};
+    vector_float3 bore = {0.99195305f, 0.09315844f, 0.08573598f};
+    vector_float3 calibrated_grip = {-5.50067915f, 8.82883667f, 11.86078145f};
+    assert(p2_xr_aim_viewmodel(&basis, &rolled, moved, calibrated_grip, bore, &gun));
+    vector_float3 radians = gun.angles * ((float)M_PI / 180);
+    float sp = sinf(radians.x), cp = cosf(radians.x), sy = sinf(radians.y), cy = cosf(radians.y);
+    float sr = sinf(radians.z), cr = cosf(radians.z);
+    vector_float3 model_forward = {cp * cy, cp * sy, -sp};
+    vector_float3 model_left = {sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, sr * cp};
+    matrix_float3x3 source_from_model = {{model_forward, model_left, simd_cross(model_forward, model_left)}};
+    vector_float3 wanted_grip = simd_mul(basis.source_from_tracking,
+        rolled.controllers[P2_XR_AIM_HAND].tracking_from_grip.columns[3]).xyz + moved - basis.eye;
+    assert(p2_xr_aim_controller(&basis, &rolled, &offset, &direction));
+    near3(gun.origin + simd_mul(source_from_model, wrist), wanted_grip);
+    near3(simd_mul(source_from_model, bore), direction);
 }
 static void turning_and_settings(void) {
     P2XRSnapTurn s = {0};

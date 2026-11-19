@@ -77,7 +77,8 @@ final class PortalRenderer: @unchecked Sendable {
     private var spatial: (any PortalSpatialSource)?
     #if P2_GAME
     private let menuPipeline: MTLRenderPipelineState
-    private let menuDepth: MTLDepthStencilState
+    private let reticlePipeline: MTLRenderPipelineState
+    private let overlayDepth: MTLDepthStencilState
     private static let menuDistance: Float = 2
     private var anchors: [UInt64: DeviceAnchor] = [:]
     // originFromPanel of the menu panel shown now: placed when the menu first
@@ -176,6 +177,15 @@ final class PortalRenderer: @unchecked Sendable {
         descriptor.vertexFunction = library.makeFunction(name: "p2_menu_vertex")
         descriptor.fragmentFunction = library.makeFunction(name: "p2_menu_fragment")
         menuPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.vertexFunction = library.makeFunction(name: "p2_reticle_vertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "p2_reticle_fragment")
+        let blend = descriptor.colorAttachments[0]!
+        blend.isBlendingEnabled = true
+        blend.sourceRGBBlendFactor = .one
+        blend.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        blend.sourceAlphaBlendFactor = .one
+        blend.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        reticlePipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         #endif
         let depthDescriptor = MTLDepthStencilDescriptor()
         depthDescriptor.isDepthWriteEnabled = true
@@ -189,10 +199,10 @@ final class PortalRenderer: @unchecked Sendable {
         // would otherwise stretch the edge across the jump to the empty room.
         depthDescriptor.isDepthWriteEnabled = false
         depthDescriptor.depthCompareFunction = .always
-        guard let menuDepth = device.makeDepthStencilState(descriptor: depthDescriptor) else {
+        guard let overlayDepth = device.makeDepthStencilState(descriptor: depthDescriptor) else {
             throw NSError(domain: "Portal2XR", code: 2)
         }
-        self.menuDepth = menuDepth
+        self.overlayDepth = overlayDepth
         #endif
         let mesh = Self.calibrationMesh()
         vertexCount = mesh.count
@@ -543,10 +553,14 @@ final class PortalRenderer: @unchecked Sendable {
                 var backgroundDepth = projected.z / projected.w
                 encoder.setVertexBytes(&backgroundDepth, length: MemoryLayout<Float>.size, index: 1)
                 encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 3)
+                if frame.reticle.w == 1, let sourceAnchor {
+                    let eyeFromTracking = simd_inverse(sourceAnchor.originFromAnchorTransform * view.transform)
+                    encodeReticle(encoder, projection: projection, eyePoint: eyeFromTracking * frame.reticle)
+                }
                 eyesDrawn += 1
             } else if panelReady, let left, let panel = menuPanel, let head = renderHead {
                 encoder.setRenderPipelineState(menuPipeline)
-                encoder.setDepthStencilState(menuDepth)
+                encoder.setDepthStencilState(overlayDepth)
                 encoder.setFragmentTexture(left,index: 0)
                 let half = Self.panelHalfSize(width: frame.width, height: frame.height)
                 let halfWidth = half.x, halfHeight = half.y
@@ -577,6 +591,20 @@ final class PortalRenderer: @unchecked Sendable {
                 NSLog("[P2XR] Game stereo GPU submission completed: image=%llu pose=%llu eyes=2 status=%lu; physical acceptance pending",image,pose,buffer.status.rawValue)
             }
         }
+    }
+
+    private func encodeReticle(_ encoder: MTLRenderCommandEncoder, projection: simd_float4x4, eyePoint: SIMD4<Float>) {
+        var center = projection * eyePoint
+        guard center.w.isFinite, center.w > 0, center.z >= 0, center.z <= center.w,
+              abs(center.x) <= center.w, abs(center.y) <= center.w else { return }
+        // A small angular size avoids a dot that grows as the surface gets closer.
+        var radius = SIMD2(abs(projection.columns.0.x), abs(projection.columns.1.y)) * 0.0035
+        encoder.setRenderPipelineState(reticlePipeline)
+        // Share the world image's reprojection surface so the dot stays on its pixels.
+        encoder.setDepthStencilState(overlayDepth)
+        encoder.setVertexBytes(&center, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+        encoder.setVertexBytes(&radius, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
     private func recordWorldCadence(timestamp: Double, image: UInt64) {
