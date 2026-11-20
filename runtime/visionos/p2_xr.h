@@ -114,6 +114,7 @@ typedef struct {
     matrix_float4x4 source_from_tracking;
     vector_float3 origin; // engine eye origin at the last alignment/follow
     float engine_yaw;     // engine yaw as last written or observed, degrees
+    float view_height;    // render-only Source Z displacement, zero on the body
     uint32_t aligned;
 } P2XRBody;
 int p2_xr_body_align(P2XRBody *body, const P2XRFrame *frame, vector_float3 origin,
@@ -125,6 +126,16 @@ float p2_xr_body_observe(P2XRBody *body, float engine_yaw);
 int p2_xr_body_turn(P2XRBody *body, float degrees);
 // Carry the tracking space with the engine eye origin (translation only).
 int p2_xr_body_follow(P2XRBody *body, vector_float3 origin);
+// Derive a camera mapping from the canonical body. Source pitch is positive
+// down, around the current physical head center. Positive height raises the
+// view in Source units while the engine eye origin stays at the stock height.
+// The height is clamped so the 2-unit near plane stays inside the stock
+// standing and crouched hulls (8 units of headroom; crouched eye 28 above
+// the floor), whatever the units-per-meter scale.
+#define P2_XR_VIEW_HEIGHT_MIN -26.0f
+#define P2_XR_VIEW_HEIGHT_MAX 6.0f
+int p2_xr_body_camera(const P2XRBody *body, const P2XRFrame *frame, float pitch_degrees,
+                      float height_source_units, P2XRBody *camera);
 // Engine angles aiming where the head looks: pitch clamped, roll 0. Records
 // the yaw as the engine's expected yaw. 0 when the head looks straight up/down.
 int p2_xr_body_aim(P2XRBody *body, const P2XRFrame *frame, vector_float3 *angles);
@@ -177,8 +188,9 @@ typedef struct {
     uint64_t sequence;       // pose sequence the head aim was computed from
     double stamp;            // monotonic seconds when the head drove the engine
     matrix_float4x4 source_from_tracking;
-    vector_float3 eye;       // engine eye origin source_from_tracking follows
+    vector_float3 eye;       // stock engine eye origin (without view height)
     vector_float3 head;      // unit forward of the engine angles the head wrote
+    float view_height;       // render-only Source Z displacement
 } P2XRAimBasis;
 // head_angles: the Source pitch/yaw/roll written to the engine.
 int p2_xr_aim_basis(P2XRAimBasis *basis, uint64_t session, uint64_t sequence, double stamp,

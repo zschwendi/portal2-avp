@@ -459,6 +459,109 @@ static P2XRFrame controller(P2XRFrame f, vector_float3 position, float yaw, floa
     return f;
 }
 static void near3(vector_float3 a, vector_float3 b) { assert(simd_distance(a, b) < 0.01f); }
+static void seated_camera(void) {
+    const float scale = P2_XR_UNITS_PER_METER;
+    const vector_float3 seat = {0, 1.2f, 0}, eye = {100, 200, 64};
+    const vector_float3 lift = {0, 0, 5};
+    P2XRFrame f = head(0, 0, seat);
+    P2XRBody body = {0}, level, raised;
+    assert(p2_xr_body_align(&body, &f, eye, 28, scale));
+    matrix_float4x4 original = body.source_from_tracking;
+    f = controller(head(-37, 20, seat + (vector_float3){0.15f, -0.2f, 0.1f}),
+                   (vector_float3){0.25f, 1.15f, -0.1f}, 41, -10);
+
+    assert(p2_xr_body_camera(&body, &f, 0, 0, &level));
+    assert(!memcmp(&level.source_from_tracking, &original, sizeof(original)));
+    near3(level.origin, body.origin);
+    near(level.engine_yaw, body.engine_yaw);
+    near(level.view_height, 0);
+    assert(!p2_xr_body_camera(&body, &f, NAN, lift.z, &level));
+    assert(!p2_xr_body_camera(&body, &f, 0, INFINITY, &level));
+
+    // The final height keeps the 2-unit near plane inside the stock hulls at
+    // any scale; the launcher's -30...+15 cm fits unclamped at the default.
+    const float hull[][2] = {{0.15f * scale, 0.15f * scale}, {-0.30f * scale, -0.30f * scale},
+                             {0.15f * 100, P2_XR_VIEW_HEIGHT_MAX}, {-0.30f * 100, P2_XR_VIEW_HEIGHT_MIN}};
+    for (unsigned i = 0; i < sizeof(hull) / sizeof(hull[0]); ++i) {
+        assert(p2_xr_body_camera(&body, &f, 0, hull[i][0], &level));
+        near(level.view_height, hull[i][1]);
+        near(head_origin(&level, &f).z, head_origin(&body, &f).z + hull[i][1]);
+    }
+    assert(P2_XR_VIEW_HEIGHT_MAX + 2 <= 8 && P2_XR_VIEW_HEIGHT_MIN - 2 >= -28);
+
+    // The physical head has moved away from the engine eye. Tilt pivots at
+    // that actual head, preserves its yaw, and keeps both eyes together.
+    vector_float3 center = head_origin(&body, &f), angles;
+    assert(simd_distance(center, eye) > 1);
+    assert(p2_xr_body_camera(&body, &f, 32, 0, &level));
+    assert(p2_xr_body_camera(&body, &f, 32, lift.z, &raised));
+    near3(head_origin(&level, &f), center);
+    near3(head_origin(&raised, &f), center + lift);
+    near3(raised.origin, eye);
+    assert(p2_xr_body_aim(&raised, &f, &angles));
+    near(angles.x, 12); near(angles.y, -9);
+    P2XRSourceView views[P2_XR_EYE_COUNT];
+    for (unsigned i = 0; i < P2_XR_EYE_COUNT; ++i) {
+        P2XRSourceView before;
+        assert(p2_xr_source_view(&f, i, level.source_from_tracking, &before));
+        assert(p2_xr_source_view(&f, i, raised.source_from_tracking, &views[i]));
+        near3(views[i].origin, before.origin + lift);
+        near3(views[i].angles, before.angles);
+        same_matrix(views[i].projection, before.projection);
+    }
+    near(simd_distance(views[0].origin, views[1].origin), 0.064f * scale);
+    near3((views[0].origin + views[1].origin) * 0.5f, center + lift);
+
+    P2XRAimBasis low_basis, high_basis;
+    assert(p2_xr_aim_basis(&low_basis, 1, 1, 0, &level, angles));
+    assert(p2_xr_aim_basis(&high_basis, 1, 1, 0, &raised, angles));
+    vector_float3 low_start, high_start, low_dir, high_dir;
+    assert(p2_xr_aim_controller(&low_basis, &f, &low_start, &low_dir));
+    assert(p2_xr_aim_controller(&high_basis, &f, &high_start, &high_dir));
+    near3(low_start, high_start); near3(low_dir, high_dir);
+    // A clamped request subtracts only the height actually applied.
+    P2XRBody clamped;
+    P2XRAimBasis clamped_basis;
+    assert(p2_xr_body_camera(&body, &f, 32, 40, &clamped));
+    assert(p2_xr_aim_basis(&clamped_basis, 1, 1, 0, &clamped, angles));
+    assert(p2_xr_aim_controller(&clamped_basis, &f, &high_start, &high_dir));
+    near3(low_start, high_start); near3(low_dir, high_dir);
+    assert(p2_xr_aim_ray(&low_basis, &f, eye, low_basis.head, &low_start, &low_dir));
+    assert(p2_xr_aim_ray(&high_basis, &f, eye, high_basis.head, &high_start, &high_dir));
+    near3(low_start, high_start); near3(low_dir, high_dir);
+
+    // Visual geometry keeps the height. Invert the raised mapping for the
+    // actual collision hit and recover that same world point in the eye.
+    P2XRSourceView low_model, high_model;
+    vector_float3 bore = {1, 0, 0}, zero = {0, 0, 0};
+    assert(p2_xr_aim_viewmodel(&low_basis, &f, eye, zero, bore, &low_model));
+    assert(p2_xr_aim_viewmodel(&high_basis, &f, eye, zero, bore, &high_model));
+    near3(high_model.origin, low_model.origin + lift);
+    near3(high_model.angles, low_model.angles);
+    vector_float3 world_hit = high_start + high_dir * 75;
+    vector_float4 hit = {world_hit.x, world_hit.y, world_hit.z, 1};
+    matrix_float4x4 inverse = simd_inverse(high_basis.source_from_tracking);
+    vector_float4 tracking_hit = simd_mul(inverse, hit);
+    vector_float4 old_hit = simd_mul(simd_inverse(low_basis.source_from_tracking), hit);
+    near3(tracking_hit.xyz, old_hit.xyz - simd_mul(inverse, (vector_float4){0, 0, lift.z, 0}).xyz);
+    near3(simd_mul(raised.source_from_tracking, tracking_hit).xyz, world_hit);
+
+    // Clamping before the pole keeps horizontal gaze yaw from flipping.
+    f = head(73, 89.9f, seat);
+    assert(p2_xr_body_camera(&body, &f, -45, 0, &raised) && p2_xr_body_aim(&raised, &f, &angles));
+    near(angles.x, -P2_XR_PITCH_LIMIT); near(angles.y, 101);
+    matrix_float4x4 roll = simd_matrix4x4(simd_quaternion(0.5f * (float)M_PI, (vector_float3){0, 0, 1}));
+    for (int sign = -1; sign <= 1; sign += 2) {
+        f = head(73, sign * 90, seat);
+        f.tracking_from_head = simd_mul(f.tracking_from_head, roll);
+        assert(p2_xr_body_camera(&body, &f, -45 * sign, 0, &raised));
+        assert(p2_xr_body_aim(&raised, &f, &angles));
+        near(angles.x, -P2_XR_PITCH_LIMIT * sign); near(angles.y, body.engine_yaw);
+    }
+    assert(!memcmp(&body.source_from_tracking, &original, sizeof(original)));
+    near3(body.origin, eye);
+    near(body.view_height, 0);
+}
 static void controller_aim(void) {
     const float m = P2_XR_UNITS_PER_METER;
     vector_float3 seat = {0, 1.2f, 0}, eye = {100, 200, 64};
@@ -676,9 +779,9 @@ static void concurrent_publication(void) {
 int main(void) {
     invalid_poses();
     views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
-    symmetric_cover(); head_aim_body(); portal_crossing(); turning_and_settings(); turning_117(); controller_aim();
+    symmetric_cover(); head_aim_body(); portal_crossing(); seated_camera(); turning_and_settings(); turning_117(); controller_aim();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication, "
-         "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, snap and 117 smooth turn, settings, "
+         "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, seated camera, snap and 117 smooth turn, settings, "
          "controller portal aim (freshness, hull clamp, head-direction guard, viewmodel pose)");
     return 0;
 }

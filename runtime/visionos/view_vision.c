@@ -8,6 +8,7 @@
 #include "modules.h"
 #include "view_vision.h"
 #include "aim_vision.h"
+#include "game_vision.h"
 #include "gl_vision.h"
 #include "reticle_trace.h"
 #include "../../build/visionos/xr-profile.h"
@@ -160,10 +161,33 @@ static uint32_t aim_interface, aim_get, aim_set, aim_buffer;
 static uint64_t aim_session;    // tracked session whose head drives engine angles
 static unsigned aim_rebases;
 static P2XRSnapTurn snap;
-static P2XRSmoothTurn smooth_turn;
+static P2XRSmoothTurn smooth_turn, smooth_pitch;
+static float stick_pitch; // 117 virtual tilt, Source degrees (+ down); recenter levels it
 static uint32_t turn_connected, turn_spatial;
+static uint64_t button_session, recenter_session;
 
-static void reset_smooth_turn(void) { smooth_turn = (P2XRSmoothTurn){0}; }
+static void reset_smooth_turn(void) {
+    smooth_turn = (P2XRSmoothTurn){0};
+    smooth_pitch = (P2XRSmoothTurn){0};
+}
+
+// A fresh left-stick press during gameplay requests a recenter, applied by the
+// next render whose head can be aligned. Presses held over from another
+// session, tracking loss or a menu are consumed, never replayed afterwards,
+// as is the left stick still held after a both-stick (window) chord.
+static void watch_recenter(uint64_t session, uint32_t buttons, int usable) {
+    if (session != button_session) { button_session = session; previous_buttons = buttons; }
+    int pressed = (buttons & P2_XR_RECENTER) && !(previous_buttons & (P2_XR_RECENTER | P2_XR_WINDOW));
+    previous_buttons = buttons;
+    if (!session || !usable) recenter_session = 0;
+    else if (pressed) recenter_session = session;
+}
+
+static int seated_camera(const P2XRFrame *pose, P2XRBody *camera) {
+    // p2_xr_body_camera clamps the final Source height for any scale.
+    float height = p2_vision_game_eye_height_cm() * 0.01f * units_per_meter;
+    return p2_xr_body_camera(&body, pose, stick_pitch, height, camera);
+}
 
 static void aim_refuse(const char *reason) {
     aim_status = -1; aim_session = 0;
@@ -240,9 +264,10 @@ static int aim_observe(CPU *c, uint64_t session, vector_float3 *engine) {
             turn,engine->y,expected,body.origin.x,body.origin.y,body.origin.z);
     return 1;
 }
-static void aim_drive(CPU *c, const P2XRFrame *pose, uint64_t session, vector_float3 engine) {
+static void aim_drive(CPU *c, const P2XRFrame *pose, P2XRBody *camera, uint64_t session, vector_float3 engine) {
     vector_float3 head;
-    if (aim_status <= 0 || aligned_session != session || !p2_xr_body_aim(&body,pose,&head)) return;
+    if (aim_status <= 0 || aligned_session != session || !p2_xr_body_aim(camera,pose,&head)) return;
+    body.engine_yaw = head.y;
     aim_write(c,head);
     if (!aim_confirmed) {
         // Until one real change reads back, prove the setter feeds the getter.
@@ -260,7 +285,7 @@ static void aim_drive(CPU *c, const P2XRFrame *pose, uint64_t session, vector_fl
     aim_session = session;
     // Tracked controller aim (aim_vision.c) uses this body and checks every
     // engine shot against the angles just written.
-    p2_vision_aim_publish(session,pose->sequence,&body,head);
+    p2_vision_aim_publish(session,pose->sequence,camera,head);
 }
 // Session over: leave the angles where the head last aimed, level roll and
 // in-range pitch, so windowed stick look continues without a snap.
@@ -276,12 +301,14 @@ static void aim_release(CPU *c) {
     aim_session = 0;
     p2_vision_aim_clear();
     snap = (P2XRSnapTurn){0};
+    stick_pitch = 0;
     reset_smooth_turn();
 }
 static void aim_poll(void) {
     P2XRFrame pose; P2XRInput controls;
     uint64_t session = p2_xr_read_latest(&pose,&controls);
     int live = session && aligned_session == session && installed && !failed;
+    watch_recenter(session,controls.buttons,live && !rt_ios_game_ui_visible());
     if (!aim_session && !live) return;
     CPU *c = rt_foreign_thread_attach();
     if (!c) return;
@@ -302,8 +329,21 @@ static void aim_poll(void) {
             p2_xr_117_smooth_turn(&smooth_turn,controls.turn_x,controls.look_y,smooth_rate,pose.presentation_time) :
             p2_xr_snap_turn(&snap,controls.turn_x,snap_degrees);
         if (turn != 0) p2_xr_body_turn(&body,turn);
+        // Like 117, the vertical axis uses the same dead zone, squared
+        // response and ramp at half the horizontal turn speed, within 117's
+        // ±45 degree tilt; physical head pitch adds on top (final ±89). Source
+        // pitch increases downward, so the same signed response makes up look up.
+        if (smooth_rate > 0) {
+            const float limit = 45.0f;
+            float pitch_delta = p2_xr_117_smooth_turn(&smooth_pitch,controls.look_y,controls.turn_x,
+                fminf(smooth_rate * 0.5f,120),pose.presentation_time);
+            float proposed = stick_pitch + pitch_delta;
+            stick_pitch = fmaxf(-limit,fminf(limit,proposed));
+            if (proposed != stick_pitch) smooth_pitch.velocity = 0;
+        }
     }
-    aim_drive(c,&pose,session,engine);
+    P2XRBody camera;
+    if (seated_camera(&pose,&camera)) aim_drive(c,&pose,&camera,session,engine);
 }
 int p2_vision_view_rendering(void) { return rendering; }
 int p2_vision_head_aim_active(void) {
@@ -313,6 +353,7 @@ int p2_vision_head_aim_active(void) {
 static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned char *view) {
     P2XRFrame pose; P2XRInput controls;
     uint64_t session = p2_xr_read_latest(&pose,&controls);
+    if (!rendering) watch_recenter(session,controls.buttons,!rt_ios_game_ui_visible());
     int diagnostic = !session && stereo_audit;
     if ((!session && !diagnostic) || rendering) return 0;
     int width = 0, height = 0;
@@ -324,29 +365,35 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
     // aim_poll, 10 Hz). Never poll here: the poll also runs queued console
     // commands and autoexec, which must not execute inside RenderView.
     if (rt_ios_game_ui_visible() || view[32]) return 0;
-    if (session && (controls.buttons & P2_XR_RECENTER) && !(previous_buttons & P2_XR_RECENTER)) {
-        aligned_session = 0;
-        reset_smooth_turn();
-    }
-    previous_buttons = controls.buttons;
     vector_float3 origin = {field(view,112),field(view,116),field(view,120)};
     vector_float3 angles = {field(view,124),field(view,128),field(view,132)};
+    P2XRBody seated;
     if (session) {
         // Observe before following: a crossing in this frame's simulation
         // turns the body about the old origin, then follow carries it across.
         vector_float3 engine;
         int aim = aim_observe(c,session,&engine);
-        if (aligned_session != session) {
+        P2XRBody next;
+        // Entry and recenter face the current heading at the stock eye with a
+        // level virtual tilt; physical head pitch stays physical. Straight
+        // up/down has no heading: keep a valid alignment until one exists.
+        if ((aligned_session != session || recenter_session == session) &&
+            p2_xr_body_align(&next,&pose,origin,aim ? engine.y : angles.y,units_per_meter)) {
+            if (aligned_session == session)
+                fprintf(stderr,"[vision-aim] Recentered at engine yaw %.2f (virtual pitch %.2f -> 0)\n",next.engine_yaw,stick_pitch);
+            body = next;
+            stick_pitch = 0;
             reset_smooth_turn();
-            if (p2_xr_body_align(&body,&pose,origin,aim ? engine.y : angles.y,units_per_meter)) aligned_session = session;
-        } else {
+            aligned_session = session;
+            recenter_session = 0;
+        } else if (aligned_session == session) {
             // Without head aim the engine yaw is stick-driven: follow it.
             if (aim_session != session) p2_xr_body_turn(&body,remainderf(angles.y - previous_yaw,360));
             p2_xr_body_follow(&body,origin);
-        }
+        } else reset_smooth_turn();
         previous_yaw = angles.y;
-        if (aligned_session != session) return 0;
-        if (aim) aim_drive(c,&pose,session,engine);
+        if (aligned_session != session || !seated_camera(&pose,&seated)) return 0;
+        if (aim) aim_drive(c,&pose,&seated,session,engine);
     }
     for (unsigned eye = 0; eye < 2; ++eye) {
         if (!eye_views[eye]) eye_views[eye] = rt_alloc(P2_XR_VIEW_SETUP_SIZE);
@@ -369,7 +416,7 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
         P2XRSourceView source = {.origin=origin,.angles=angles};
         float fov = 0;
         if (session) {
-            if (!p2_xr_source_view(&pose,eye,body.source_from_tracking,&source)) goto mono;
+            if (!p2_xr_source_view(&pose,eye,seated.source_from_tracking,&source)) goto mono;
             // CViewSetup fov is horizontal over the full width at aspect
             // width/height (93.695 logged for 90 at 4:3 on 1024x720), so a
             // symmetric frustum needs no unverified off-center fields.

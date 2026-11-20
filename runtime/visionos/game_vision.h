@@ -18,6 +18,14 @@ int p2_vision_game_state(void);
 // engine start. These are app frame-rate targets. Any thread.
 int p2_vision_game_hfr_target(void);
 int p2_vision_game_fps_limit(void);
+// Comfort offset from the game camera's normal height. Reading is safe on
+// the game thread; the launcher sets and saves the bounded value on the UI thread.
+enum {
+    P2_VISION_EYE_HEIGHT_MIN_CM = -30,
+    P2_VISION_EYE_HEIGHT_MAX_CM = 15,
+};
+int p2_vision_game_eye_height_cm(void);
+void p2_vision_game_set_eye_height_cm(int centimeters);
 // Runs the completeness check without starting the engine (also writes the
 // status file, and remembers the report). Returns report->complete. Any thread.
 int p2_vision_content_check(const char *trigger, P2ContentReport *report);

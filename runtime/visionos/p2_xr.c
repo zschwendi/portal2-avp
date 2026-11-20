@@ -347,6 +347,41 @@ int p2_xr_body_follow(P2XRBody *body, vector_float3 origin) {
     body->origin = origin;
     return 1;
 }
+int p2_xr_body_camera(const P2XRBody *body, const P2XRFrame *frame, float pitch_degrees,
+                      float height_source_units, P2XRBody *camera) {
+    if (!body || !body->aligned || !camera || !valid_frame(frame) || !finite_vector(body->origin) ||
+        !isfinite(pitch_degrees) || !isfinite(height_source_units) ||
+        !finite_matrix(body->source_from_tracking) ||
+        fabsf(simd_determinant(body->source_from_tracking)) < 1e-8f) return 0;
+
+    P2XRBody result = *body;
+    if (pitch_degrees != 0) {
+        matrix_float4x4 head = simd_mul(body->source_from_tracking, frame->tracking_from_head);
+        vector_float3 forward = -head.columns[2].xyz;
+        float horizontal = hypotf(forward.x, forward.y);
+        const float degrees_to_radians = (float)M_PI / 180;
+        // Near the pole the gaze no longer supplies a useful bearing. Keep
+        // the last engine yaw, independent of physical roll at that pole.
+        float last_yaw = body->engine_yaw * degrees_to_radians;
+        vector_float3 left = horizontal >= 1e-3f * simd_length(forward) ?
+            (vector_float3){-forward.y, forward.x, 0} : (vector_float3){-sinf(last_yaw), cosf(last_yaw), 0};
+        float length = simd_length(left);
+        if (!(length > 1e-6f) || !isfinite(length)) return 0;
+        const float limit = P2_XR_PITCH_LIMIT * degrees_to_radians;
+        float head_pitch = atan2f(-forward.z, horizontal);
+        float target = fmaxf(-limit, fminf(limit, head_pitch + pitch_degrees * degrees_to_radians));
+        matrix_float4x4 turn = simd_matrix4x4(simd_quaternion(target - head_pitch, left / length));
+        vector_float3 center = head.columns[3].xyz;
+        turn.columns[3].xyz = center - simd_mul(turn, (vector_float4){center.x, center.y, center.z, 1}).xyz;
+        result.source_from_tracking = simd_mul(turn, result.source_from_tracking);
+    }
+    float height = fmaxf(P2_XR_VIEW_HEIGHT_MIN, fminf(P2_XR_VIEW_HEIGHT_MAX, height_source_units));
+    if (height != 0) result.source_from_tracking.columns[3].z += height;
+    result.view_height = height;
+    if (!finite_matrix(result.source_from_tracking)) return 0;
+    *camera = result;
+    return 1;
+}
 int p2_xr_body_aim(P2XRBody *body, const P2XRFrame *frame, vector_float3 *angles) {
     if (!body || !body->aligned || !angles || !valid_frame(frame) ||
         !finite_matrix(body->source_from_tracking) ||
@@ -436,9 +471,11 @@ static int invertible(matrix_float4x4 m) {
 int p2_xr_aim_basis(P2XRAimBasis *basis, uint64_t session, uint64_t sequence, double stamp,
                     const P2XRBody *body, vector_float3 head_angles) {
     if (!basis || !session || !sequence || !isfinite(stamp) || !body || !body->aligned ||
-        !invertible(body->source_from_tracking) || !finite_vector(body->origin) || !finite_vector(head_angles)) return 0;
+        !invertible(body->source_from_tracking) || !finite_vector(body->origin) || !finite_vector(head_angles) ||
+        !isfinite(body->view_height)) return 0;
     *basis = (P2XRAimBasis){.session=session,.sequence=sequence,.stamp=stamp,
-        .source_from_tracking=body->source_from_tracking,.eye=body->origin,.head=angle_forward(head_angles)};
+        .source_from_tracking=body->source_from_tracking,.eye=body->origin,.head=angle_forward(head_angles),
+        .view_height=body->view_height};
     return 1;
 }
 int p2_xr_aim_fresh(const P2XRAimBasis *basis, uint64_t session, const P2XRFrame *latest, double now) {
@@ -453,6 +490,9 @@ int p2_xr_aim_controller(const P2XRAimBasis *basis, const P2XRFrame *latest,
         !invertible(basis->source_from_tracking) || !finite_vector(basis->eye)) return 0;
     matrix_float4x4 aim = simd_mul(basis->source_from_tracking, latest->controllers[P2_XR_AIM_HAND].tracking_from_aim);
     vector_float3 forward = -aim.columns[2].xyz, from = aim.columns[3].xyz - basis->eye;
+    // The viewmodel and both eyes share the raised mapping. Portal placement
+    // must still start within the stock player hull at the unadjusted height.
+    from.z -= basis->view_height;
     if (!finite_vector(forward) || !finite_vector(from) || simd_length(forward) < 1e-6f) return 0;
     *offset = from;
     *direction = simd_normalize(forward);

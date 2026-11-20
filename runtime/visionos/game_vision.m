@@ -1,7 +1,9 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_VISION
 #import <Foundation/Foundation.h>
+#include <dispatch/dispatch.h>
 #include <errno.h>
+#include <limits.h>
 #include <mach-o/dyld.h>
 #include <os/lock.h>
 #include <stdatomic.h>
@@ -40,6 +42,35 @@ static int configured_fps_limit(void) {
 int p2_vision_game_fps_limit(void) {
     int started = atomic_load(&started_fps_limit);
     return started ? started : configured_fps_limit();
+}
+
+static NSString *const eye_height_key = @"P2VisionEyeHeightCentimeters";
+static _Atomic int eye_height_cm = INT_MIN;
+
+static int bounded_eye_height(NSInteger centimeters) {
+    return (int)MIN(MAX(centimeters, P2_VISION_EYE_HEIGHT_MIN_CM), P2_VISION_EYE_HEIGHT_MAX_CM);
+}
+
+static void load_eye_height(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSInteger saved = [NSUserDefaults.standardUserDefaults integerForKey:eye_height_key];
+        atomic_store_explicit(&eye_height_cm, bounded_eye_height(saved), memory_order_relaxed);
+    });
+}
+
+int p2_vision_game_eye_height_cm(void) {
+    int centimeters = atomic_load_explicit(&eye_height_cm, memory_order_relaxed);
+    if (centimeters != INT_MIN) return centimeters;
+    load_eye_height();
+    return atomic_load_explicit(&eye_height_cm, memory_order_relaxed);
+}
+
+void p2_vision_game_set_eye_height_cm(int centimeters) {
+    load_eye_height();
+    centimeters = bounded_eye_height(centimeters);
+    [NSUserDefaults.standardUserDefaults setInteger:centimeters forKey:eye_height_key];
+    atomic_store_explicit(&eye_height_cm, centimeters, memory_order_relaxed);
 }
 
 // Immersive eye size request: width << 32 | height, 0 for the windowed size.
@@ -164,6 +195,7 @@ int p2_vision_game_start(const char *trigger, int intent) {
     int expected = current;
     if (!atomic_compare_exchange_strong(&state, &expected, 1)) return 0;
     atomic_store(&started_fps_limit, fps_limit);
+    load_eye_height();
     content_status(documents, &report, trigger, 1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         @autoreleasepool {
