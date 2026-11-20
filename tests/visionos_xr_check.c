@@ -552,11 +552,18 @@ static void seated_camera(void) {
     near(angles.x, -P2_XR_PITCH_LIMIT); near(angles.y, 101);
     matrix_float4x4 roll = simd_matrix4x4(simd_quaternion(0.5f * (float)M_PI, (vector_float3){0, 0, 1}));
     for (int sign = -1; sign <= 1; sign += 2) {
-        f = head(73, sign * 90, seat);
-        f.tracking_from_head = simd_mul(f.tracking_from_head, roll);
-        assert(p2_xr_body_camera(&body, &f, -45 * sign, 0, &raised));
-        assert(p2_xr_body_aim(&raised, &f, &angles));
-        near(angles.x, -P2_XR_PITCH_LIMIT * sign); near(angles.y, body.engine_yaw);
+        float last_yaw = 0;
+        for (int pole = -1; pole <= 1; ++pole) {
+            f = head(73, sign * (90 + pole * 0.001f), seat);
+            f.tracking_from_head = simd_mul(f.tracking_from_head, roll);
+            assert(p2_xr_body_camera(&body, &f, -45 * sign, 0, &raised));
+            assert(p2_xr_body_aim(&raised, &f, &angles));
+            // Clamping the tilted gaze at the pole still retains the near-
+            // vertical heading across both sides, even with 90 degrees of roll.
+            near(angles.x, -P2_XR_PITCH_LIMIT * sign);
+            if (pole > -1) assert(fabsf(remainderf(angles.y - last_yaw, 360)) < 0.2f);
+            last_yaw = angles.y;
+        }
     }
     assert(!memcmp(&body.source_from_tracking, &original, sizeof(original)));
     near3(body.origin, eye);
@@ -735,12 +742,17 @@ static void turning_117(void) {
     assert(p2_xr_117_smooth_turn(&state, -1, 0, rate, 1.05) > 0);
     near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 1.06), 0);
     assert(state.velocity == 0);
-    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.25), 0);
+    // Past the stall limit, or backwards in time, a held stick needs neutral.
+    double late = 1.06 + P2_XR_117_STALL_LIMIT + 0.01;
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, late), 0);
     assert(!state.armed);
-    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, 1.26), 0);
-    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, 1.27), 0);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, late + 0.01), 0);
+    near(p2_xr_117_smooth_turn(&state, 0, 0, rate, late + 0.02), 0);
     assert(state.armed);
-    near(p2_xr_117_smooth_turn(&state, NAN, 0, rate, 1.28), 0);
+    assert(p2_xr_117_smooth_turn(&state, 1, 0, rate, late + 0.03) < 0);
+    near(p2_xr_117_smooth_turn(&state, 1, 0, rate, late), 0);
+    assert(!state.armed);
+    near(p2_xr_117_smooth_turn(&state, NAN, 0, rate, late + 0.04), 0);
     assert(!state.armed && !state.has_timestamp);
 
     P2XRFrame f = frame();
@@ -751,6 +763,180 @@ static void turning_117(void) {
     assert(p2_xr_body_aim(&body, &f, &angles));
     near(angles.y, turn);
     near(p2_xr_body_observe(&body, angles.y), 0);
+}
+static float yaw_error(float actual, float expected) { return fabsf(remainderf(actual - expected, 360)); }
+// The engine (producer) stalls 60-300 ms while the right stick is held: no
+// pose reaches the turn, then the presentation timestamp jumps.
+static void producer_stall(void) {
+    const float rate = P2_XR_117_SMOOTH_RATE;
+    const double frame_time = 1.0 / 38, pauses[] = {0.06, 0.099, 0.101, 0.117, 0.2, 0.289, 0.3};
+    const float steady = -rate * (float)frame_time;
+    const vector_float3 seat = {0, 1.2f, 0};
+    for (unsigned i = 0; i < sizeof(pauses) / sizeof(pauses[0]); ++i) {
+        P2XRSmoothTurn state = {0};
+        double t = 10, total = 0;
+        float turn = 0;
+        near(p2_xr_117_smooth_turn(&state, 0, 0, rate, t), 0);
+        for (int n = 0; n < 38; ++n) {
+            t += frame_time;
+            turn = p2_xr_117_smooth_turn(&state, 1, 0, rate, t);
+            total += turn;
+        }
+        assert(fabsf(turn - steady) < 0.01f);
+        P2XRFrame f = head(0, 0, seat);
+        P2XRBody body = {0};
+        vector_float3 aim;
+        assert(p2_xr_body_align(&body, &f, (vector_float3){100, 200, 64}, 0, P2_XR_UNITS_PER_METER));
+        assert(p2_xr_body_turn(&body, (float)total));
+
+        // Still held when the engine returns: this sample turns nothing.
+        t += pauses[i];
+        near(p2_xr_117_smooth_turn(&state, 1, 0, rate, t), 0);
+        assert(state.armed && state.velocity == 0);
+        // The head moved physically during the pause. That is aim, never a
+        // body turn, and the engine reading it back re-bases nothing.
+        matrix_float4x4 held = body.source_from_tracking;
+        f = head(25, 10, seat);
+        assert(p2_xr_body_aim(&body, &f, &aim));
+        assert(yaw_error(aim.y, (float)total + 25) < 0.01f); near(aim.x, -10);
+        near(p2_xr_body_observe(&body, aim.y), 0);
+        assert(!memcmp(&held, &body.source_from_tracking, sizeof(held)));
+        // Gradual resumption from rest; no sample ever exceeds the steady rate.
+        float previous = 0;
+        for (int n = 0; n < 12; ++n) {
+            t += frame_time;
+            turn = p2_xr_117_smooth_turn(&state, 1, 0, rate, t);
+            assert(turn < previous && turn >= steady - 1e-4f);
+            if (!n) assert(turn > steady * 0.25f);
+            previous = turn;
+        }
+        // Released during a pause: nothing moves; a new push starts from rest.
+        t += pauses[i];
+        near(p2_xr_117_smooth_turn(&state, 0, 0, rate, t), 0);
+        assert(state.armed && state.velocity == 0);
+        t += frame_time;
+        turn = p2_xr_117_smooth_turn(&state, 1, 0, rate, t);
+        assert(turn < 0 && turn > steady * 0.25f);
+        // Reversed during a pause: the old direction never coasts.
+        for (int n = 0; n < 10; ++n) {
+            t += frame_time;
+            p2_xr_117_smooth_turn(&state, 1, 0, rate, t);
+        }
+        t += pauses[i];
+        near(p2_xr_117_smooth_turn(&state, -1, 0, rate, t), 0);
+        t += frame_time;
+        turn = p2_xr_117_smooth_turn(&state, -1, 0, rate, t);
+        assert(turn > 0 && turn < -steady * 0.25f);
+        // Longer than a stall: the held stick waits for neutral.
+        t += P2_XR_117_STALL_LIMIT + pauses[i];
+        near(p2_xr_117_smooth_turn(&state, -1, 0, rate, t), 0);
+        assert(!state.armed);
+        t += frame_time;
+        near(p2_xr_117_smooth_turn(&state, -1, 0, rate, t), 0);
+    }
+
+    // At sustained 15 FPS the stick continues to work, with the angular
+    // step limited to the full-speed 30 Hz step after the first slow frame.
+    P2XRSmoothTurn slow = {0};
+    near(p2_xr_117_smooth_turn(&slow, 0, 0, rate, 0), 0);
+    near(p2_xr_117_smooth_turn(&slow, 1, 0, rate, 1.0 / 15), 0);
+    for (int frame = 2; frame < 16; ++frame) {
+        float turn = p2_xr_117_smooth_turn(&slow, 1, 0, rate, frame / 15.0);
+        assert(turn < 0 && turn >= -rate / 30);
+    }
+}
+// A reader that stalled tells its own gap from a break it never saw.
+static uint64_t turn_interruptions(void) {
+    uint64_t count;
+    p2_xr_read_latest_for_turn(NULL, NULL, &count);
+    return count;
+}
+static void interruption_count(void) {
+    uint64_t before = turn_interruptions();
+    uint64_t session = p2_xr_begin_session();
+    assert(turn_interruptions() == before + 1);
+    P2XRFrame f = frame(), lost;
+    P2XRInput input = {.turn_x=1, .connected=1};
+    assert(p2_xr_publish_frame(session, &f));
+    assert(p2_xr_publish_input(session, &input));
+    uint64_t steady = turn_interruptions();
+    assert(steady == before + 2);
+    // A producer stall changes nothing here, whatever the pose times do.
+    f.sequence = 2; f.presentation_time = 1.3;
+    assert(p2_xr_publish_frame(session, &f));
+    assert(p2_xr_publish_input(session, &input));
+    assert(turn_interruptions() == steady);
+    // One dropped head frame is not a break, nor is the sample it rejects.
+    lost = f; lost.sequence = 3; lost.presentation_time = 1.311; lost.tracked = 0;
+    assert(!p2_xr_publish_frame(session, &lost));
+    p2_xr_publish_input(session, &input);
+    f.sequence = 4; f.presentation_time = 1.322;
+    assert(p2_xr_publish_frame(session, &f));
+    assert(p2_xr_publish_input(session, &input));
+    assert(turn_interruptions() == steady);
+    // Tracking that stays lost is one.
+    lost.sequence = 5; lost.presentation_time = 1.333;
+    assert(!p2_xr_publish_frame(session, &lost));
+    f.sequence = 6; f.presentation_time = 1.6;
+    assert(p2_xr_publish_frame(session, &f));
+    assert(p2_xr_publish_input(session, &input));
+    assert(turn_interruptions() == steady + 1);
+    // So is a controller released, reconnected or of another kind.
+    p2_xr_release_input(session);
+    assert(turn_interruptions() == steady + 2);
+    p2_xr_release_input(session);
+    assert(turn_interruptions() == steady + 2);
+    assert(p2_xr_publish_input(session, &input));
+    assert(turn_interruptions() == steady + 3);
+    input.spatial = 1;
+    assert(p2_xr_publish_input(session, &input));
+    assert(turn_interruptions() == steady + 4);
+    p2_xr_end_session(session);
+    assert(turn_interruptions() == steady + 5);
+    p2_xr_end_session(session);
+    assert(turn_interruptions() == steady + 5);
+}
+// The stick tilt pivots about the head's own horizontal axis: at any head yaw
+// and pitch, the clamp near vertical included, it changes the engine pitch
+// and never the yaw, and a horizontal turn under it is exactly that turn.
+static void seated_pitch_heading(void) {
+    const vector_float3 seat = {0, 1.2f, 0};
+    const float tilts[] = {-45, -20, 20, 45}, pitches[] = {-80, -40, 0, 40, 80};
+    P2XRFrame f = head(0, 0, seat);
+    P2XRBody body = {0};
+    assert(p2_xr_body_align(&body, &f, (vector_float3){100, 200, 64}, 28, P2_XR_UNITS_PER_METER));
+    for (int yaw = -150; yaw <= 150; yaw += 30)
+        for (unsigned p = 0; p < sizeof(pitches) / sizeof(pitches[0]); ++p)
+            for (unsigned t = 0; t < sizeof(tilts) / sizeof(tilts[0]); ++t) {
+                P2XRBody plain = body, camera;
+                vector_float3 level, tilted;
+                f = head((float)yaw, pitches[p], seat);
+                assert(p2_xr_body_aim(&plain, &f, &level));
+                assert(p2_xr_body_camera(&body, &f, tilts[t], 0, &camera) && p2_xr_body_aim(&camera, &f, &tilted));
+                float pitch = fmaxf(-P2_XR_PITCH_LIMIT, fminf(P2_XR_PITCH_LIMIT, level.x + tilts[t]));
+                assert(yaw_error(tilted.y, level.y) < 0.05f && fabsf(tilted.x - pitch) < 0.05f && tilted.z == 0);
+                assert(p2_xr_body_turn(&plain, -30) && p2_xr_body_camera(&plain, &f, tilts[t], 0, &camera));
+                assert(p2_xr_body_aim(&camera, &f, &tilted));
+                assert(yaw_error(tilted.y, level.y - 30) < 0.05f && fabsf(tilted.x - pitch) < 0.05f);
+            }
+}
+static void seated_pitch_through_vertical(void) {
+    const vector_float3 seat = {0, 1.2f, 0};
+    P2XRFrame f = head(0, 0, seat);
+    P2XRBody body = {0};
+    assert(p2_xr_body_align(&body, &f, (vector_float3){100, 200, 64}, 28, P2_XR_UNITS_PER_METER));
+    for (int sign = -1; sign <= 1; sign += 2) {
+        vector_float3 previous = {0};
+        for (int step = -2; step <= 2; ++step) {
+            f = head(32, sign * (90 + step * 0.1f), seat);
+            P2XRBody camera;
+            assert(p2_xr_body_camera(&body, &f, sign * 35, 0, &camera));
+            matrix_float4x4 source = simd_mul(camera.source_from_tracking, f.tracking_from_head);
+            vector_float3 forward = simd_normalize(-source.columns[2].xyz);
+            if (step > -2) assert(simd_distance(previous, forward) < 0.0035f);
+            previous = forward;
+        }
+    }
 }
 static void *reader(void *arg) {
     uint64_t session = *(uint64_t *)arg;
@@ -780,8 +966,10 @@ int main(void) {
     invalid_poses();
     views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
     symmetric_cover(); head_aim_body(); portal_crossing(); seated_camera(); turning_and_settings(); turning_117(); controller_aim();
+    producer_stall(); interruption_count(); seated_pitch_heading(); seated_pitch_through_vertical();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication, "
          "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, seated camera, snap and 117 smooth turn, settings, "
+         "producer stall turn resumption, interruption count, seated pitch heading, "
          "controller portal aim (freshness, hull clamp, head-direction guard, viewmodel pose)");
     return 0;
 }

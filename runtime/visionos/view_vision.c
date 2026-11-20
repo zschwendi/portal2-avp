@@ -164,11 +164,13 @@ static P2XRSnapTurn snap;
 static P2XRSmoothTurn smooth_turn, smooth_pitch;
 static float stick_pitch; // 117 virtual tilt, Source degrees (+ down); recenter levels it
 static uint32_t turn_connected, turn_spatial;
+static uint64_t turn_interruptions;
 static uint64_t button_session, recenter_session;
 
-static void reset_smooth_turn(void) {
+static void reset_turn_input(void) {
     smooth_turn = (P2XRSmoothTurn){0};
     smooth_pitch = (P2XRSmoothTurn){0};
+    snap.latched = 1; // center after a tracking, session or control break
 }
 
 // A fresh left-stick press during gameplay requests a recenter, applied by the
@@ -300,13 +302,13 @@ static void aim_release(CPU *c) {
         (unsigned long long)aim_session,engine.x,engine.y,read);
     aim_session = 0;
     p2_vision_aim_clear();
-    snap = (P2XRSnapTurn){0};
     stick_pitch = 0;
-    reset_smooth_turn();
+    reset_turn_input();
 }
 static void aim_poll(void) {
     P2XRFrame pose; P2XRInput controls;
-    uint64_t session = p2_xr_read_latest(&pose,&controls);
+    uint64_t interruptions;
+    uint64_t session = p2_xr_read_latest_for_turn(&pose,&controls,&interruptions);
     int live = session && aligned_session == session && installed && !failed;
     watch_recenter(session,controls.buttons,live && !rt_ios_game_ui_visible());
     if (!aim_session && !live) return;
@@ -315,14 +317,19 @@ static void aim_poll(void) {
     if (aim_session && (failed || !p2_xr_session_active(aim_session))) { aim_release(c); return; }
     // Tracking lost or awaiting (re)alignment: keep the expectation; the
     // change is observed once tracking returns.
-    if (!live) { reset_smooth_turn(); return; }
+    if (!live) { reset_turn_input(); return; }
     rt_ios_game_state_poll();
     vector_float3 engine;
-    if (rt_ios_game_ui_visible() || !aim_observe(c,session,&engine)) { reset_smooth_turn(); return; }
-    if (controls.connected != turn_connected || controls.spatial != turn_spatial || !controls.connected) {
-        reset_smooth_turn();
+    if (rt_ios_game_ui_visible() || !aim_observe(c,session,&engine)) { reset_turn_input(); return; }
+    // A producer stall alone keeps a held stick armed (p2_xr_117_smooth_turn).
+    // A tracking or controller break this poll never saw, because it sat
+    // inside that stall, still ends the turn until the stick is centered.
+    if (controls.connected != turn_connected || controls.spatial != turn_spatial || !controls.connected ||
+        interruptions != turn_interruptions) {
+        reset_turn_input();
         turn_connected = controls.connected;
         turn_spatial = controls.spatial;
+        turn_interruptions = interruptions;
     }
     if (aim_session == session && controls.connected) {
         float turn = smooth_rate > 0 ?
@@ -350,6 +357,9 @@ int p2_vision_head_aim_active(void) {
     return aim_session && aim_session == p2_xr_read_latest(NULL,NULL);
 }
 
+static double stage_ms(uint64_t since) {
+    return (double)(SDL_GetPerformanceCounter() - since) * 1000 / (double)SDL_GetPerformanceFrequency();
+}
 static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned char *view) {
     P2XRFrame pose; P2XRInput controls;
     uint64_t session = p2_xr_read_latest(&pose,&controls);
@@ -383,14 +393,14 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
                 fprintf(stderr,"[vision-aim] Recentered at engine yaw %.2f (virtual pitch %.2f -> 0)\n",next.engine_yaw,stick_pitch);
             body = next;
             stick_pitch = 0;
-            reset_smooth_turn();
+            reset_turn_input();
             aligned_session = session;
             recenter_session = 0;
         } else if (aligned_session == session) {
             // Without head aim the engine yaw is stick-driven: follow it.
             if (aim_session != session) p2_xr_body_turn(&body,remainderf(angles.y - previous_yaw,360));
             p2_xr_body_follow(&body,origin);
-        } else reset_smooth_turn();
+        } else reset_turn_input();
         previous_yaw = angles.y;
         if (aligned_session != session || !seated_camera(&pose,&seated)) return 0;
         if (aim) aim_drive(c,&pose,&seated,session,engine);
@@ -449,13 +459,22 @@ static int render_stereo(CPU *c, const uint32_t original_args[5], const unsigned
                 put_float(setup,136,2); put_float(setup,144,2);
             }
         }
-        if (p2_vision_gl_begin_eye(eye)) goto mono;
+        // Stage times feed the [vision-pacing] summary (gl_vision.m).
+        uint64_t stage = SDL_GetPerformanceCounter();
+        int selected = !p2_vision_gl_begin_eye(eye);
+        p2_vision_gl_stage(P2_VISION_STAGE_EYE_SELECT,stage_ms(stage));
+        if (!selected) goto mono;
         crosshair.mode = reticle;
         if (reticle == P2_VISION_RETICLE_TRACKED) place_crosshair(&pose, eye, cover[eye], tracking_hit, width, height);
         uint32_t args[5]; memcpy(args,original_args,sizeof(args));
         args[1] = eye_views[eye]; args[2] = eye_hud[eye];
+        stage = SDL_GetPerformanceCounter();
         c->eax = rt_invoke(c,original,args,5);
-        if (p2_vision_gl_end_eye(eye)) goto mono;
+        p2_vision_gl_stage(P2_VISION_STAGE_EYE_RENDER,stage_ms(stage));
+        stage = SDL_GetPerformanceCounter();
+        int captured = !p2_vision_gl_end_eye(eye);
+        p2_vision_gl_stage(P2_VISION_STAGE_EYE_CAPTURE,stage_ms(stage));
+        if (!captured) goto mono;
     }
     // Publish the projection each image was rendered with; the compositor
     // crops it with sourceProj * inverse(currentProj).

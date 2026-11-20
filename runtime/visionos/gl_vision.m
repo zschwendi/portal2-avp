@@ -70,11 +70,70 @@ static EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext
 static EGLBoolean (*destroy_surface)(EGLDisplay, EGLSurface);
 static EGLBoolean (*destroy_context)(EGLDisplay, EGLContext);
 static EGLContext (*get_current)(void);
+static EGLSurface (*get_current_surface)(EGLint);
 static void (*finish)(void);
 static EGLint (*get_error)(void);
 // Producer-thread presentation cadence (p2_vision_gl_cadence): consecutive
 // presents at most 100 ms apart, and consecutive tracked stereo presents.
 static P2VisionGLCadence cadence;
+// Always-on producer pacing (gl_vision.h): an ordinary run's log must be able
+// to quantify the engine's frame rate, its gaps and where a frame's time went.
+enum { PACING_SAMPLES = 1536, PACING_SECONDS = 10 };
+static struct {
+    uint64_t start, previous;
+    unsigned presents, stereo, long_gaps, count;
+    int width, height;
+    float gaps[PACING_SAMPLES];
+    double stage_ms[P2_VISION_STAGE_COUNT];
+    unsigned stage_calls[P2_VISION_STAGE_COUNT];
+} pacing;
+static double milliseconds_since(uint64_t start) {
+    return (double)(SDL_GetPerformanceCounter() - start) * 1000 / (double)SDL_GetPerformanceFrequency();
+}
+void p2_vision_gl_stage(unsigned stage, double milliseconds) {
+    if (stage >= P2_VISION_STAGE_COUNT || milliseconds < 0) return;
+    pacing.stage_ms[stage] += milliseconds;
+    ++pacing.stage_calls[stage];
+}
+static int compare_gaps(const void *a, const void *b) {
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+static void note_pacing(uint64_t now, int stereo, int width, int height) {
+    double frequency = (double)SDL_GetPerformanceFrequency();
+    if (!pacing.start || width != pacing.width || height != pacing.height) {
+        memset(&pacing,0,sizeof(pacing));
+        pacing.start = pacing.previous = now;
+        pacing.width = width;
+        pacing.height = height;
+        return;
+    }
+    float gap = (float)((double)(now - pacing.previous) * 1000 / frequency);
+    pacing.previous = now;
+    if (pacing.count < PACING_SAMPLES) pacing.gaps[pacing.count++] = gap;
+    ++pacing.presents;
+    pacing.stereo += stereo != 0;
+    pacing.long_gaps += gap > 100;
+    double seconds = (double)(now - pacing.start) / frequency;
+    if (seconds < PACING_SECONDS) return;
+    unsigned n = pacing.count;
+    qsort(pacing.gaps,n,sizeof(pacing.gaps[0]),compare_gaps);
+    double ms[P2_VISION_STAGE_COUNT];
+    for (unsigned stage = 0; stage < P2_VISION_STAGE_COUNT; ++stage)
+        ms[stage] = pacing.stage_calls[stage] ? pacing.stage_ms[stage] / pacing.stage_calls[stage] : 0;
+    fprintf(stderr,"[vision-pacing] %.1f s at %dx%d: %u presents (%.1f/s, %u stereo), interval ms p50=%.1f p95=%.1f p99=%.1f max=%.1f, "
+        "%u over 100 ms; mean ms per call: eye select %.2f (glFinish %.2f when switching), RenderView %.2f, eye capture %.2f; "
+        "present glFinish %.2f, %.2f ms per slot wait (%u waits)\n",
+        seconds,width,height,pacing.presents,pacing.presents / seconds,pacing.stereo,
+        pacing.gaps[(n - 1) / 2],pacing.gaps[(n - 1) * 95 / 100],pacing.gaps[(n - 1) * 99 / 100],pacing.gaps[n - 1],
+        pacing.long_gaps,ms[P2_VISION_STAGE_EYE_SELECT],ms[P2_VISION_STAGE_EYE_FINISH],
+        ms[P2_VISION_STAGE_EYE_RENDER],ms[P2_VISION_STAGE_EYE_CAPTURE],
+        ms[P2_VISION_STAGE_PRESENT_FINISH],ms[P2_VISION_STAGE_SLOT_WAIT],pacing.stage_calls[P2_VISION_STAGE_SLOT_WAIT]);
+    memset(&pacing,0,sizeof(pacing));
+    pacing.start = pacing.previous = now;
+    pacing.width = width;
+    pacing.height = height;
+}
 
 static void *open_framework(NSString *name) {
     NSString *path = [[[NSBundle mainBundle] privateFrameworksPath] stringByAppendingPathComponent:
@@ -101,6 +160,7 @@ static int load_angle(void) {
     LOAD(destroy_surface, "eglDestroySurface"); LOAD(destroy_context, "eglDestroyContext");
     LOAD(get_error, "eglGetError");
 #undef LOAD
+    get_current_surface = (EGLSurface (*)(EGLint))dlsym(egl_library, "eglGetCurrentSurface");
     finish = (void (*)(void))dlsym(gles_library, "glFinish");
     return finish != NULL;
 }
@@ -257,8 +317,17 @@ int p2_vision_gl_resize(int width, int height) {
 int p2_vision_gl_select_eye(uint32_t eye) {
     VisionContext *context = host;
     if (!context || eye >= 2) return -1;
-    finish();
     EGLSurface surface = context->slots[context->writing].surface[eye];
+    // Present already binds eye 0 of the next slot. An eye selection that
+    // leaves the actual EGL binding alone needs no producer GPU flush.
+    if (get_current() == context->context && get_current_surface &&
+        get_current_surface(EGL_DRAW) == surface && get_current_surface(EGL_READ) == surface) {
+        context->eye = (int)eye;
+        return 0;
+    }
+    uint64_t began = SDL_GetPerformanceCounter();
+    finish();
+    p2_vision_gl_stage(P2_VISION_STAGE_EYE_FINISH,milliseconds_since(began));
     if (!make_current(context->display,surface,surface,context->context)) return -1;
     context->eye = (int)eye;
     return 0;
@@ -361,7 +430,9 @@ void p2_vision_gl_present(void) {
         if (++wrong_context <= 3) fprintf(stderr,"[gl-vision] Refused publication without the producer context\n");
         return;
     }
+    uint64_t began = SDL_GetPerformanceCounter(), waited = 0;
     finish(); // Producer GPU writes must finish before another Metal queue samples the storage.
+    p2_vision_gl_stage(P2_VISION_STAGE_PRESENT_FINISH,milliseconds_since(began));
     pthread_mutex_lock(&lock);
     context->slots[context->writing].sequence = ++context->sequence;
     SurfaceSlot *completed = &context->slots[context->writing];
@@ -376,19 +447,26 @@ void p2_vision_gl_present(void) {
     context->pending_kind = 0; context->pending_session = 0; context->pending_flip_left_y = 0;
     memset(&context->pending_pose,0,sizeof(context->pending_pose));
     context->published = context->writing;
+    uint64_t published_at = SDL_GetPerformanceCounter();
     int next = -1;
     while (next < 0) {
         for (int i = 0; i < SLOT_COUNT; ++i)
             if (i != context->published && !context->slots[i].leases) { next = i; break; }
-        if (next < 0) pthread_cond_wait(&available, &lock);
+        if (next < 0) {
+            if (!waited) waited = SDL_GetPerformanceCounter();
+            pthread_cond_wait(&available, &lock);
+        }
     }
     context->writing = next;
     context->eye = 0;
+    int stereo = completed->kind != P2_VISION_MONO;
     pthread_mutex_unlock(&lock);
+    if (waited) p2_vision_gl_stage(P2_VISION_STAGE_SLOT_WAIT,milliseconds_since(waited));
     EGLSurface surface = context->slots[next].surface[0];
     if (!make_current(context->display, surface, surface, context->context))
         fprintf(stderr, "[gl-vision] Could not switch producer slot: EGL error %#x\n", get_error());
     audit_timing(context->sequence);
+    note_pacing(published_at,stereo,context->width,context->height);
 }
 int p2_vision_gl_acquire(P2VisionGLFrame *frame) {
     if (!frame) return 0;

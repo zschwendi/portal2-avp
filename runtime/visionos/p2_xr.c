@@ -12,6 +12,14 @@ static double last_presentation_time;
 static P2XRFrame latest_frame;
 static P2XRInput latest_input;
 static int window_session;
+// Breaks in what a held control means: a session start
+// or end, head tracking that returns after more than 100 ms without a tracked
+// frame, a controller that connects, disconnects, changes kind or is released
+// by its owner. One dropped head frame is not a break, and neither is a
+// consumer that stopped reading for a while (a producer stall).
+#define P2_XR_TRACKING_BREAK 0.10
+static uint64_t interruptions;
+static uint32_t owner_connected, owner_spatial;
 // Right Sense controller tracking loss in an immersive session: actions held
 // at that moment are released at once (GameController may send no new event)
 // and stay released until that control is let go. Sticks and every other
@@ -115,6 +123,8 @@ static uint64_t begin_session(int windowed) {
     memset(&latest_frame, 0, sizeof(latest_frame));
     memset(&latest_input, 0, sizeof(latest_input));
     forget_held();
+    ++interruptions;
+    owner_connected = owner_spatial = 0;
     uint64_t session = active_session;
     pthread_mutex_unlock(&state_lock);
     return session;
@@ -134,6 +144,8 @@ void p2_xr_end_session(uint64_t session) {
         memset(&latest_frame, 0, sizeof(latest_frame));
         memset(&latest_input, 0, sizeof(latest_input));
         forget_held();
+        ++interruptions;
+        owner_connected = owner_spatial = 0;
     }
     pthread_mutex_unlock(&state_lock);
 }
@@ -166,6 +178,8 @@ int p2_xr_publish_frame(uint64_t session, const P2XRFrame *frame) {
                    frame->presentation_time < last_presentation_time) accepted = 0;
         else {
             int lost = latest_frame.tracked && latest_frame.controllers[1].tracked && !frame->controllers[1].tracked;
+            if (!latest_frame.tracked && last_presentation_time > 0 &&
+                frame->presentation_time - last_presentation_time > P2_XR_TRACKING_BREAK) ++interruptions;
             latest_frame = *frame;
             for (unsigned hand = 0; hand < 2; ++hand) if (dropped >> hand & 1) note_rejection(1 + hand, original);
             if (lost && latest_input.spatial) release_held();
@@ -198,6 +212,11 @@ int p2_xr_publish_input(uint64_t session, const P2XRInput *input) {
         // another device, a disconnect or the window forgets it.
         if (window_session || !input->spatial || !input->connected) forget_held();
         else if (latest_input.spatial) mask_held();
+        // The device, not this sample's fate: a sample rejected while the
+        // head is lost says nothing about who holds the controls.
+        uint32_t connected = input->connected, spatial = input->spatial != 0;
+        if (connected != owner_connected || spatial != owner_spatial) ++interruptions;
+        owner_connected = connected; owner_spatial = spatial;
     }
     pthread_mutex_unlock(&state_lock);
     return accepted;
@@ -210,13 +229,17 @@ int p2_xr_read(uint64_t session, P2XRFrame *frame, P2XRInput *input) {
     pthread_mutex_unlock(&state_lock);
     return valid;
 }
-uint64_t p2_xr_read_latest(P2XRFrame *frame, P2XRInput *input) {
+uint64_t p2_xr_read_latest_for_turn(P2XRFrame *frame, P2XRInput *input, uint64_t *breaks) {
     pthread_mutex_lock(&state_lock);
     uint64_t session = latest_frame.tracked ? active_session : 0;
     if (frame) { memset(frame, 0, sizeof(*frame)); if (session) *frame = latest_frame; }
     if (input) { memset(input, 0, sizeof(*input)); if (session) *input = latest_input; }
+    if (breaks) *breaks = interruptions;
     pthread_mutex_unlock(&state_lock);
     return session;
+}
+uint64_t p2_xr_read_latest(P2XRFrame *frame, P2XRInput *input) {
+    return p2_xr_read_latest_for_turn(frame, input, NULL);
 }
 uint64_t p2_xr_read_controls(P2XRInput *input) {
     pthread_mutex_lock(&state_lock);
@@ -227,7 +250,11 @@ uint64_t p2_xr_read_controls(P2XRInput *input) {
 }
 void p2_xr_release_input(uint64_t session) {
     pthread_mutex_lock(&state_lock);
-    if (session && session == active_session) memset(&latest_input, 0, sizeof(latest_input));
+    if (session && session == active_session) {
+        memset(&latest_input, 0, sizeof(latest_input));
+        if (owner_connected) ++interruptions;
+        owner_connected = owner_spatial = 0;
+    }
     pthread_mutex_unlock(&state_lock);
 }
 int p2_xr_align(const P2XRFrame *frame, vector_float3 origin, float yaw,
@@ -358,19 +385,23 @@ int p2_xr_body_camera(const P2XRBody *body, const P2XRFrame *frame, float pitch_
     if (pitch_degrees != 0) {
         matrix_float4x4 head = simd_mul(body->source_from_tracking, frame->tracking_from_head);
         vector_float3 forward = -head.columns[2].xyz;
-        float horizontal = hypotf(forward.x, forward.y);
         const float degrees_to_radians = (float)M_PI / 180;
-        // Near the pole the gaze no longer supplies a useful bearing. Keep
-        // the last engine yaw, independent of physical roll at that pole.
-        float last_yaw = body->engine_yaw * degrees_to_radians;
-        vector_float3 left = horizontal >= 1e-3f * simd_length(forward) ?
-            (vector_float3){-forward.y, forward.x, 0} : (vector_float3){-sinf(last_yaw), cosf(last_yaw), 0};
+        // Closest level heading to the headset rotation. The projected left
+        // axis keeps the tilt direction continuous as the projected forward
+        // axis shrinks and reverses across vertical. The sum is degenerate
+        // only for an upside-down orientation, where we retain the last yaw.
+        vector_float3 left = {-forward.y - head.columns[0].x, forward.x - head.columns[0].y, 0};
         float length = simd_length(left);
-        if (!(length > 1e-6f) || !isfinite(length)) return 0;
+        if (length > 1e-3f * simd_length(forward)) left /= length;
+        else {
+            float last_yaw = body->engine_yaw * degrees_to_radians;
+            left = (vector_float3){-sinf(last_yaw), cosf(last_yaw), 0};
+        }
+        vector_float3 level_forward = {left.y, -left.x, 0};
         const float limit = P2_XR_PITCH_LIMIT * degrees_to_radians;
-        float head_pitch = atan2f(-forward.z, horizontal);
+        float head_pitch = atan2f(-forward.z, simd_dot(forward, level_forward));
         float target = fmaxf(-limit, fminf(limit, head_pitch + pitch_degrees * degrees_to_radians));
-        matrix_float4x4 turn = simd_matrix4x4(simd_quaternion(target - head_pitch, left / length));
+        matrix_float4x4 turn = simd_matrix4x4(simd_quaternion(target - head_pitch, left));
         vector_float3 center = head.columns[3].xyz;
         turn.columns[3].xyz = center - simd_mul(turn, (vector_float4){center.x, center.y, center.z, 1}).xyz;
         result.source_from_tracking = simd_mul(turn, result.source_from_tracking);
@@ -424,10 +455,18 @@ float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float x, float y, float rate,
     }
     double elapsed = state->has_timestamp ? timestamp - state->timestamp : 0;
     if (state->has_timestamp && elapsed == 0) return 0;
-    if (elapsed < 0 || elapsed > 0.10) {
+    if (elapsed < 0 || elapsed > P2_XR_117_STALL_LIMIT) {
         *state = (P2XRSmoothTurn){0};
         elapsed = 0;
-    }
+    } else if (elapsed > 1.0 / 20.0) {
+        int slow = elapsed <= 0.10;
+        if (slow && state->slow_sample) elapsed = 1.0 / 30.0;
+        else {
+            state->velocity = 0;
+            elapsed = 0;
+        }
+        state->slow_sample = slow;
+    } else state->slow_sample = 0;
     state->timestamp = timestamp;
     state->has_timestamp = 1;
 

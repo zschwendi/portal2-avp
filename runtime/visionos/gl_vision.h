@@ -30,3 +30,12 @@ int p2_vision_gl_on_producer_thread(void);
 // SDL_GetTicks64 time of the last present. A pool resize resets both counts.
 typedef struct { unsigned steady, stereo; uint64_t last_ms; } P2VisionGLCadence;
 void p2_vision_gl_cadence(P2VisionGLCadence *cadence);
+// Producer pacing summary, always on: one [vision-pacing] line per 10 s of
+// presents with the present rate, interval percentiles and the milliseconds
+// spent per stage. Producer thread only; callers add what they measured.
+// EYE_FINISH (the glFinish before switching eye surfaces) is part of
+// EYE_SELECT; EYE_RENDER is the guest RenderView call.
+enum { P2_VISION_STAGE_EYE_SELECT, P2_VISION_STAGE_EYE_FINISH, P2_VISION_STAGE_EYE_RENDER,
+       P2_VISION_STAGE_EYE_CAPTURE, P2_VISION_STAGE_PRESENT_FINISH, P2_VISION_STAGE_SLOT_WAIT,
+       P2_VISION_STAGE_COUNT };
+void p2_vision_gl_stage(unsigned stage, double milliseconds);

@@ -72,6 +72,9 @@ int p2_xr_read(uint64_t session, P2XRFrame *frame, P2XRInput *input);
 // Engine-side coherent snapshot, including the current session identity.
 // Returns 0 when there is no valid tracked immersive frame.
 uint64_t p2_xr_read_latest(P2XRFrame *frame, P2XRInput *input);
+// The pose, controls, and count of session, tracking and input ownership
+// breaks share a snapshot so a missed poll can't mask an interruption.
+uint64_t p2_xr_read_latest_for_turn(P2XRFrame *frame, P2XRInput *input, uint64_t *breaks);
 uint64_t p2_xr_read_controls(P2XRInput *input);
 void p2_xr_release_input(uint64_t session);
 // Frame parts rejected so far: [0] head/eyes (whole frame dropped),
@@ -151,10 +154,14 @@ float p2_xr_smooth_turn(float turn_x, float degrees_per_second, float seconds);
 #define P2_XR_117_SMOOTH_RATE 180.0f
 typedef struct {
     double timestamp, velocity;
-    uint32_t has_timestamp, armed;
+    uint32_t has_timestamp, armed, slow_sample;
 } P2XRSmoothTurn;
 // Feed each presentation timestamp once. look_y participates only in detecting
 // neutral release. Output is a Source yaw delta (positive stick turns right).
+// A gap over 50 ms skips the missed turn and restarts the ramp. If samples
+// keep arriving every 50–100 ms, limit each turn step to a 30 Hz step. Past
+// P2_XR_117_STALL_LIMIT or on backwards time the stick must center again.
+#define P2_XR_117_STALL_LIMIT 0.5
 float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float turn_x, float look_y,
                            float degrees_per_second, double timestamp);
 // Numeric setting text (environment). *value is always usable: 0 unset,

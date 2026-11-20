@@ -86,14 +86,26 @@ final class PortalRenderer: @unchecked Sendable {
     private var eyeSizeRequested = false
     private var reportedGame = false
     private var frameLeases: [Int32] = []
-    private var cadenceStart: Double?
-    private var cadenceSubmissions = 0
-    private var cadenceImages = 0
-    private var cadenceReports = 0
-    private var lastImageSequence: UInt64?
-    private let auditCadence = ProcessInfo.processInfo.environment["P2_VISION_FRAME_AUDIT"] == "1"
     private enum FrameContent: String { case menu = "menu-panel", world = "stereo-world", simulator = "simulator-panel" }
     private var frameContent: FrameContent?
+    // Presentation-side pacing of the stereo world, always on: one summary per
+    // 10 s of display time for the whole session. Intervals and ages are in
+    // display time; the producer's own clock is [vision-pacing] in game.log.
+    private struct WorldPacing: Sendable {
+        var start: Double?
+        var frames = 0, world = 0, panels = 0, cleared = 0, images = 0
+        var untracked = 0, anchorMisses = 0, submissionFailures = 0
+        var lastFrame: Double?
+        var lastImage: Double?
+        var lastSequence: UInt64?
+        var frameIntervals: [Double] = [], imageIntervals: [Double] = [], imageAges: [Double] = []
+    }
+    private var pacing = WorldPacing()
+    // Display time since which no stereo world frame was shown, and what was
+    // presented meanwhile; nil while the world shows.
+    private var worldMissingSince: Double?
+    private var worldMissingFrames = 0
+    private var worldShownBefore = false
     #if targetEnvironment(simulator)
     private let simulatorPreview = ProcessInfo.processInfo.arguments.contains("--immersive-test")
     #endif
@@ -272,18 +284,28 @@ final class PortalRenderer: @unchecked Sendable {
         return false
     }
 
+    private func noteSubmissionFailure() {
+        #if P2_GAME
+        pacing.submissionFailures += 1
+        #endif
+    }
+
     private func renderFrame() {
         guard let frame = layer.queryNextFrame() else { return }
         frame.startUpdate(); frame.endUpdate()
-        guard let timing = frame.predictTiming() else { return }
+        guard let timing = frame.predictTiming() else { noteSubmissionFailure(); return }
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
-        guard let command = queue.makeCommandBuffer() else { return }
+        guard let command = queue.makeCommandBuffer() else { noteSubmissionFailure(); return }
         frame.startSubmission()
         let drawables: [LayerRenderer.Drawable]
         if #available(visionOS 26.0, *) { drawables = frame.queryDrawables() }
         else { drawables = frame.queryDrawable().map { [$0] } ?? [] }
         // An empty query cancels/invalidates the frame; do not access it again.
-        guard !drawables.isEmpty else { invalidateTracking(); return }
+        guard !drawables.isEmpty else {
+            noteSubmissionFailure()
+            invalidateTracking()
+            return
+        }
         defer { frame.endSubmission() }
         for drawable in drawables {
             encode(drawable: drawable, command: command)
@@ -562,13 +584,16 @@ final class PortalRenderer: @unchecked Sendable {
         }
         // Released by renderFrame's completion handler, after the GPU is done.
         if leased { frameLeases.append(frame.slot) }
+        var shown: FrameContent?
         if builtIn && eyesDrawn > 0 && eyesDrawn == drawable.views.count {
-            if worldReady {
-                frameContent = .world
-                recordWorldCadence(timestamp: timestamp, image: frame.sequence)
-            } else if panelReady {
-                frameContent = preview ? .simulator : .menu
-            }
+            if worldReady { shown = .world }
+            else if panelReady { shown = preview ? .simulator : .menu }
+        }
+        if let shown { frameContent = shown }
+        if builtIn {
+            recordPacing(timestamp: timestamp, shown: shown, image: frame.sequence,
+                         renderTime: frame.render_pose.presentation_time, tracked: tracked,
+                         anchorMissed: tracked && stereo && sourceAnchor == nil)
         }
         if frameContent == .world && !reportedGame {
             reportedGame = true
@@ -579,24 +604,73 @@ final class PortalRenderer: @unchecked Sendable {
         }
     }
 
-    private func recordWorldCadence(timestamp: Double, image: UInt64) {
-        guard cadenceReports < 3 else { return }
-        let limit = p2_vision_game_fps_limit()
-        guard auditCadence || limit > 60 else { return }
-        let start = cadenceStart ?? timestamp
-        cadenceStart = start
-        let elapsed = timestamp - start
-        if elapsed >= 2 {
-            NSLog("[P2XR] World cadence: eye submissions %.1f/s, distinct game images %.1f/s, engine cap %d FPS",
-                  Double(cadenceSubmissions) / elapsed, Double(cadenceImages) / elapsed, limit)
-            cadenceStart = timestamp
-            cadenceSubmissions = 0
-            cadenceImages = 0
-            cadenceReports += 1
+    // Every built-in frame. `shown` records what was encoded for both eyes;
+    // `renderTime` is the display time the image's pose was predicted for, so
+    // an image's age is how far the compositor reprojects it. Image intervals
+    // are between the first presentations of consecutive engine images.
+    private func recordPacing(timestamp: Double, shown: FrameContent?, image: UInt64, renderTime: Double,
+                              tracked: Bool, anchorMissed: Bool) {
+        if pacing.start == nil {
+            pacing.start = timestamp
+            if !worldShownBefore && worldMissingSince == nil { worldMissingSince = timestamp }
         }
-        cadenceSubmissions += 1
-        if image != lastImageSequence { cadenceImages += 1 }
-        lastImageSequence = image
+        if let last = pacing.lastFrame, timestamp > last { pacing.frameIntervals.append(timestamp - last) }
+        pacing.lastFrame = timestamp
+        pacing.frames += 1
+        if !tracked { pacing.untracked += 1 }
+        if anchorMissed { pacing.anchorMisses += 1 }
+        if shown == .world {
+            if let since = worldMissingSince {
+                // Short dropouts stay in the summary's counts; the first world
+                // frame and anything longer get their own line.
+                if !worldShownBefore || timestamp - since >= 0.25 {
+                    NSLog("[P2XR] Stereo world encoded %@ after %.2f s and %ld frames without it",
+                          worldShownBefore ? "again" : "for the first time", timestamp - since, worldMissingFrames)
+                }
+                worldMissingSince = nil
+            }
+            worldShownBefore = true
+            pacing.world += 1
+            pacing.imageAges.append(timestamp - renderTime)
+            if image != pacing.lastSequence {
+                pacing.images += 1
+                if let last = pacing.lastImage { pacing.imageIntervals.append(timestamp - last) }
+                pacing.lastImage = timestamp
+                pacing.lastSequence = image
+            }
+        } else {
+            if worldMissingSince == nil {
+                worldMissingSince = timestamp
+                worldMissingFrames = 0
+            }
+            worldMissingFrames += 1
+            pacing.lastImage = nil // an interval never spans a menu or a dropout
+            if shown == nil { pacing.cleared += 1 } else { pacing.panels += 1 }
+        }
+        guard let start = pacing.start, timestamp - start >= 10 else { return }
+        if pacing.world > 0 || worldShownBefore || pacing.submissionFailures > 0 {
+            let seconds = timestamp - start, report = pacing, cap = p2_vision_game_fps_limit()
+            DispatchQueue.global(qos: .utility).async {
+                NSLog("[P2XR] World pacing %.1f s: %ld encoded frames (%.1f/s; world %ld, panel %ld, cleared %ld), %ld distinct images (%.1f/s), engine cap %d FPS; image interval ms %@; image age ms %@; frame interval ms %@; misses: submission %ld, untracked %ld, source anchor %ld",
+                      seconds, report.frames, Double(report.frames) / seconds, report.world, report.panels, report.cleared,
+                      report.images, Double(report.images) / seconds, cap,
+                      Self.spread(report.imageIntervals), Self.spread(report.imageAges), Self.spread(report.frameIntervals),
+                      report.submissionFailures, report.untracked, report.anchorMisses)
+            }
+        }
+        var next = WorldPacing()
+        next.start = timestamp
+        next.lastFrame = pacing.lastFrame
+        next.lastImage = pacing.lastImage
+        next.lastSequence = pacing.lastSequence
+        pacing = next
+    }
+
+    private static func spread(_ seconds: [Double]) -> String {
+        guard !seconds.isEmpty else { return "none" }
+        let sorted = seconds.sorted()
+        func at(_ fraction: Double) -> Double { sorted[Int(Double(sorted.count - 1) * fraction)] * 1000 }
+        return String(format: "p50=%.1f p95=%.1f p99=%.1f max=%.1f", at(0.5), at(0.95), at(0.99), at(1))
     }
 
     // Menu panel half extents (meters at 2 m), always the engine image's own
