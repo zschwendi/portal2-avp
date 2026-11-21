@@ -198,6 +198,67 @@ static P2XRControllerPose pose_at(float x) {
     pose.tracking_from_grip.columns[3] = pose.tracking_from_aim.columns[3];
     return pose;
 }
+static void grip_use_edges(void) {
+    uint32_t left = P2_XR_USE | P2_XR_GRIP_LEFT;
+    uint32_t right = P2_XR_USE | P2_XR_GRIP_RIGHT;
+    P2XRGripUse edge = {0};
+    unsigned hand = 99;
+
+    // Presses already held on entering eligibility are not new input.
+    p2_xr_note_grip_use(&edge, 1, right, 0);
+    assert(!p2_xr_take_grip_use(&edge, 1, 0, &hand) && hand == 99);
+    p2_xr_note_grip_use(&edge, 1, 0, 10);
+    p2_xr_note_grip_use(&edge, 1, right, 11);
+    p2_xr_note_grip_use(&edge, 1, left | right, 12); // no second SDL edge
+    assert(!p2_xr_take_grip_use(&edge, 2, 12, &hand) && hand == 99);
+    assert(p2_xr_take_grip_use(&edge, 1, 12, &hand) && hand == 1);
+    assert(!p2_xr_take_grip_use(&edge, 1, 12, &hand));
+
+    p2_xr_note_grip_use(&edge, 1, 0, 13);
+    p2_xr_note_grip_use(&edge, 1, left | right, 14);
+    p2_xr_note_grip_use(&edge, 1, 0, 15); // a quick tap still reaches pickup
+    assert(p2_xr_take_grip_use(&edge, 1, 14 + P2_XR_GRIP_USE_MAX_AGE_MS, &hand) && hand == 0);
+    p2_xr_note_grip_use(&edge, 1, left, 500);
+    assert(!p2_xr_take_grip_use(&edge, 1, 501 + P2_XR_GRIP_USE_MAX_AGE_MS, &hand));
+    assert(!p2_xr_take_grip_use(&edge, 1, 500, &hand)); // expiry consumed it
+
+    p2_xr_note_grip_use(&edge, 1, 0, 800);
+    p2_xr_note_grip_use(&edge, 1, left, 801);
+    p2_xr_note_grip_use(&edge, 1, 0, 802);
+    p2_xr_note_grip_use(&edge, 1, P2_XR_USE, 803); // Sense face button uses the weapon hand
+    assert(p2_xr_take_grip_use(&edge, 1, 803, &hand) && hand == 1);
+    p2_xr_note_grip_use(&edge, 1, 0, 804);
+    p2_xr_note_grip_use(&edge, 1, right, 805);
+    p2_xr_note_grip_use(&edge, 0, right, 806); // game UI or route change
+    p2_xr_note_grip_use(&edge, 1, right, 807);
+    assert(!p2_xr_take_grip_use(&edge, 1, 808, &hand));
+
+    uint64_t session = p2_xr_begin_session();
+    P2XRFrame f = frame();
+    f.controllers[1] = pose_at(2.3f);
+    assert(p2_xr_publish_frame(session, &f));
+    P2XRInput input = {.connected = 1, .spatial = 1, .buttons = left | right}, read;
+    assert(p2_xr_publish_input(session, &input));
+    assert(p2_xr_read_controls(&read) == session && read.buttons == (left | right));
+
+    // Existing action masking drops its metadata too, including on release.
+    f.sequence = 2; f.presentation_time = 2; f.controllers[1].tracked = 0;
+    assert(p2_xr_publish_frame(session, &f));
+    assert(p2_xr_publish_input(session, &input));
+    assert(p2_xr_read_controls(&read) == session && !read.buttons);
+    input.buttons = 0;
+    assert(p2_xr_publish_input(session, &input));
+    input.buttons = left; // usable with the right hand still untracked
+    assert(p2_xr_publish_input(session, &input));
+    assert(p2_xr_read_controls(&read) == session && read.buttons == left);
+    input.buttons = P2_XR_GRIP_LEFT;
+    assert(p2_xr_publish_input(session, &input));
+    assert(p2_xr_read_controls(&read) == session && !read.buttons);
+    input.spatial = 0; input.buttons = right;
+    assert(p2_xr_publish_input(session, &input));
+    assert(p2_xr_read_controls(&read) == session && read.buttons == P2_XR_USE);
+    p2_xr_end_session(session);
+}
 // Invalid accessory poses never disable valid head/eye tracking; invalid
 // head/eye poses still reject the whole frame.
 static void invalid_poses(void) {
@@ -676,6 +737,19 @@ static void controller_aim(void) {
     near3(gun.origin + simd_mul(source_from_model, wrist), wanted_grip);
     near3(simd_mul(source_from_model, bore), direction);
 }
+static void carry_angles(void) {
+    const vector_float3 poses[] = {{12, 175, -27}, {75, -178, 40}, {90, 27, 51}, {-90, -60, 13}};
+    for (unsigned i = 0; i < sizeof(poses) / sizeof(poses[0]); ++i) {
+        matrix_float3x3 original = p2_xr_angle_matrix(poses[i]);
+        matrix_float3x3 round_trip = p2_xr_angle_matrix(p2_xr_matrix_angles(original));
+        for (unsigned axis = 0; axis < 3; ++axis) near3(round_trip.columns[axis], original.columns[axis]);
+    }
+    matrix_float3x3 initial_grip = p2_xr_angle_matrix((vector_float3){0, 5, 0});
+    matrix_float3x3 next_grip = p2_xr_angle_matrix((vector_float3){0, 40, 0});
+    matrix_float3x3 object = p2_xr_angle_matrix((vector_float3){12, 15, -5});
+    matrix_float3x3 attachment = simd_mul(simd_transpose(initial_grip), object);
+    near3(p2_xr_matrix_angles(simd_mul(next_grip, attachment)), (vector_float3){12, 50, -5});
+}
 static void turning_and_settings(void) {
     P2XRSnapTurn s = {0};
     near(p2_xr_snap_turn(&s, 0.5f, 45), 0);
@@ -964,12 +1038,12 @@ static void concurrent_publication(void) {
 }
 int main(void) {
     invalid_poses();
-    views_and_portals(); session_and_input(); spatial_controller_tracking(); window_controls(); concurrent_publication();
-    symmetric_cover(); head_aim_body(); portal_crossing(); seated_camera(); turning_and_settings(); turning_117(); controller_aim();
+    views_and_portals(); session_and_input(); spatial_controller_tracking(); grip_use_edges(); window_controls(); concurrent_publication();
+    symmetric_cover(); head_aim_body(); portal_crossing(); seated_camera(); turning_and_settings(); turning_117(); controller_aim(); carry_angles();
     producer_stall(); interruption_count(); seated_pitch_heading(); seated_pitch_through_vertical();
     puts("XR contract passed: stereo, scale, recenter, full portal rotation, tracking loss, input release, session isolation, concurrent publication, "
          "symmetric eye cover/crop, head aim body re-base, yaw-only portal crossing, seated camera, snap and 117 smooth turn, settings, "
          "producer stall turn resumption, interruption count, seated pitch heading, "
-         "controller portal aim (freshness, hull clamp, head-direction guard, viewmodel pose)");
+         "Sense grip Use provenance, controller portal aim (freshness, hull clamp, head-direction guard, viewmodel pose)");
     return 0;
 }

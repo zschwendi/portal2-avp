@@ -7,8 +7,14 @@
 // Guest game thread, each time the head drives the engine view angles
 // (seated head aim): the body and the angles just written. Any failure, and
 // p2_vision_aim_clear, stop controller aim until the next publication.
-void p2_vision_aim_publish(uint64_t session, uint64_t sequence, const P2XRBody *body, vector_float3 head_angles);
+void p2_vision_aim_publish(uint64_t session, uint64_t sequence, const P2XRBody *camera,
+                           const P2XRBody *body, vector_float3 head_angles);
 void p2_vision_aim_clear(void);
+// Map the selected Sense grip through the gameplay body. View-only pitch and
+// height must not move a physics object as the user looks around.
+int p2_vision_carry_grip(uint64_t session, const P2XRFrame *frame, const P2XRInput *input,
+                       unsigned hand, vector_float3 stock_origin, vector_float3 *target,
+                       matrix_float3x3 *orientation);
 typedef enum {
     P2_VISION_RETICLE_HEAD,
     P2_VISION_RETICLE_HIDDEN,

@@ -12,7 +12,9 @@ import subprocess
 from types import SimpleNamespace
 
 import build_game
+import visionos_carry
 import visionos_hooks
+import visionos_pickup_hud
 import visionos_reticle
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +46,9 @@ def main():
     aim = visionos_hooks.aim_profile(config['linux_root'])
     visionos_hooks.write_header(ROOT / 'build/visionos/xr-profile.h', profile, engine, aim)
     visionos_reticle.write_header(ROOT / 'build/visionos/xr-reticle-profile.h', config['linux_root'])
+    visionos_pickup_hud.write_header(ROOT / 'build/visionos/xr-pickup-hud-profile.h', config['linux_root'])
+    out = ROOT / 'build/visionos' / (('runtime-audit-' if args.runtime_only else 'game-') + args.target)
+    out.mkdir(parents=True,exist_ok=True)
     base = ['-target',triple,'-isysroot',sdk]
     runtime = [*base,'-O2','-g',*build_game.WARNINGS,'-DRT_FAST_MEMORY','-DP2_VISION_GAME=1','-Iruntime','-Iruntime/ios',
                '-Iruntime/visionos','-I' + str(prefix / 'include'),
@@ -51,18 +56,19 @@ def main():
                '-I' + str(prefix / 'include/freetype2')]
     generated = [*base,'-O' + args.opt,'-gline-tables-only',*build_game.WARNINGS,'-DRT_FAST_MEMORY','-Iruntime']
     generated_units = []
-    if not args.runtime_only:
+    if args.runtime_only:
+        visionos_carry.disable(out)
+    else:
         layout = Path('build/game/prep/layout.json')
         data = json.loads(layout.read_text())
         manifest, _ = build_game.generate(SimpleNamespace(layout=layout,all=True,jobs=args.jobs), data, build_game.roots(data))
         source = Path('build/game/gen/src')
-        generated_units += [(str(source / name),generated) for name in sorted(manifest['shards'])]
+        carry = visionos_carry.stage(out, config['linux_root'], data, manifest, source)
+        generated_units += [(str(carry.get(name, source / name)),generated) for name in sorted(manifest['shards'])]
         generated_units.append((str(source / 'dispatch.c'),generated))
         plugins, _ = build_game.generate_plugins(Path('config/local.json'))
         generated_units += [(str(p),generated) for p in plugins]
     identity = subprocess.check_output(['clang','--version'],text=True)
-    out = ROOT / 'build/visionos' / (('runtime-audit-' if args.runtime_only else 'game-') + args.target)
-    out.mkdir(parents=True,exist_ok=True)
     print(f'Compiling {len(generated_units)} generated units for {triple}, runtime_only={args.runtime_only}',flush=True)
     game_objects, count, cpu = build_game.compile_units(generated_units,out/'obj',args.jobs,identity)
     # Plan host sources after the long generated-code phase. This captures
@@ -73,7 +79,12 @@ def main():
               ('essl3.c','srgb.c','case_path.c','fontconfig_min.c','game_state.c','steam_stub.c','steam_stub_generated.c')]
     units += [(str(Path('runtime/ios') / name), runtime + ['-fobjc-arc'])
               for name in ('gl_ios.m', 'campaign_save.m')]
-    units += [(str(p), runtime + (['-fobjc-arc'] if p.suffix == '.m' else []))
+    # The shared source cache resolves quoted includes in the runtime tree.
+    # Key this target-specific carry profile explicitly for its runtime unit.
+    carry_key = build_game.digest((out / 'xr-carry-profile.h').read_bytes())[:16]
+    carry_flags = ['-I' + str(out), '-DP2_XR_CARRY_PROFILE_HASH=0x' + carry_key + 'ULL']
+    units += [(str(p), runtime + (['-fobjc-arc'] if p.suffix == '.m' else []) +
+              (carry_flags if p.name == 'carry_vision.c' else []))
               for p in sorted(Path('runtime/visionos').glob('*')) if p.suffix in ('.c','.m')]
     units.append(('src/main.c',runtime + ['-Dmain=p2_main']))
     print(f'Compiling {len(units)} current host/runtime units',flush=True)

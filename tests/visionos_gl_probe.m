@@ -186,6 +186,118 @@ static int owned_target(SDL_Window *window,SDL_GLContext context) {
     return valid;
 }
 
+// Middle row of the newest mono frame at NDC x = -0.75, -0.25, 0.25, 0.75:
+// 1 for the white quad, 0 for the black clear, -1 for anything else.
+static int lit_columns(int lit[4]) {
+    P2VisionGLFrame frame;
+    if (!p2_vision_gl_acquire(&frame)) return 0;
+    IOSurfaceRef storage = (IOSurfaceRef)frame.surface;
+    IOSurfaceLock(storage,kIOSurfaceLockReadOnly,NULL);
+    unsigned char *base = IOSurfaceGetBaseAddress(storage);
+    unsigned char *row = base + IOSurfaceGetBytesPerRow(storage) * (frame.height / 2);
+    for (unsigned i = 0; i < 4; ++i) {
+        unsigned char green = row[(frame.width * (2 * i + 1) / 8) * 4 + 1];
+        lit[i] = green >= 253 ? 1 : green <= 2 ? 0 : -1;
+    }
+    IOSurfaceUnlock(storage,kIOSurfaceLockReadOnly,NULL);
+    p2_vision_gl_release(frame.slot);
+    return frame.kind == P2_VISION_MONO;
+}
+
+// togl clips the view through a portal at the linked portal's plane: a user
+// clip plane on programs whose vertex shader writes gl_ClipVertex. GLES has
+// neither, so gl4es must discard the far side itself. The two directions of
+// one link clip at planes facing opposite ways. Each must hide only what is
+// behind its own exit, and nothing once the plane is disabled again.
+static int clip_plane_sides(SDL_Window *window) {
+    unsigned (*create_shader)(unsigned) = rt_host_gl_symbol(NULL,"glCreateShader");
+    void (*shader_source)(unsigned,int,const char *const *,const int *) = rt_host_gl_symbol(NULL,"glShaderSource");
+    void (*kept_source)(unsigned,int,int *,char *) = rt_host_gl_symbol(NULL,"glGetShaderSource");
+    void (*compile)(unsigned) = rt_host_gl_symbol(NULL,"glCompileShader");
+    unsigned (*create_program)(void) = rt_host_gl_symbol(NULL,"glCreateProgram");
+    void (*attach)(unsigned,unsigned) = rt_host_gl_symbol(NULL,"glAttachShader");
+    void (*bind_attribute)(unsigned,unsigned,const char *) = rt_host_gl_symbol(NULL,"glBindAttribLocation");
+    void (*link)(unsigned) = rt_host_gl_symbol(NULL,"glLinkProgram");
+    void (*program_status)(unsigned,unsigned,int *) = rt_host_gl_symbol(NULL,"glGetProgramiv");
+    void (*use)(unsigned) = rt_host_gl_symbol(NULL,"glUseProgram");
+    void (*delete_program)(unsigned) = rt_host_gl_symbol(NULL,"glDeleteProgram");
+    void (*delete_shader)(unsigned) = rt_host_gl_symbol(NULL,"glDeleteShader");
+    void (*gen_buffers)(int,unsigned *) = rt_host_gl_symbol(NULL,"glGenBuffers");
+    void (*bind_buffer)(unsigned,unsigned) = rt_host_gl_symbol(NULL,"glBindBuffer");
+    void (*buffer_data)(unsigned,long,const void *,unsigned) = rt_host_gl_symbol(NULL,"glBufferData");
+    void (*delete_buffers)(int,const unsigned *) = rt_host_gl_symbol(NULL,"glDeleteBuffers");
+    void (*attribute)(unsigned,int,unsigned,unsigned char,int,const void *) = rt_host_gl_symbol(NULL,"glVertexAttribPointer");
+    void (*enable_attribute)(unsigned) = rt_host_gl_symbol(NULL,"glEnableVertexAttribArray");
+    void (*disable_attribute)(unsigned) = rt_host_gl_symbol(NULL,"glDisableVertexAttribArray");
+    void (*clip_plane)(unsigned,const double *) = rt_host_gl_symbol(NULL,"glClipPlane");
+    void (*enable)(unsigned) = rt_host_gl_symbol(NULL,"glEnable");
+    void (*disable)(unsigned) = rt_host_gl_symbol(NULL,"glDisable");
+    void (*viewport)(int,int,int,int) = rt_host_gl_symbol(NULL,"glViewport");
+    void (*clear_color)(float,float,float,float) = rt_host_gl_symbol(NULL,"glClearColor");
+    void (*clear)(unsigned) = rt_host_gl_symbol(NULL,"glClear");
+    void (*draw)(unsigned,int,int) = rt_host_gl_symbol(NULL,"glDrawArrays");
+    if (!create_shader || !shader_source || !kept_source || !compile || !create_program || !attach ||
+        !bind_attribute || !link || !program_status || !use || !delete_program || !delete_shader ||
+        !gen_buffers || !bind_buffer || !buffer_data || !delete_buffers || !attribute || !enable_attribute ||
+        !disable_attribute || !clip_plane || !enable || !disable || !viewport || !clear_color || !clear || !draw) {
+        fprintf(stderr,"[P2-GL-PROBE] FAIL: gl4es lacks an entry point of the user clip plane check\n");
+        return 0;
+    }
+    // The shape of togl's translated shaders: explicitly bound vN attributes,
+    // gl_ClipVertex taken from the position before any fixup.
+    const char *vertex_text = "#version 120\nattribute vec4 v0;\nvoid main()\n{\nvec4 vTempPos = v0;\n"
+        "gl_ClipVertex = vTempPos;\ngl_Position = vTempPos;\n}\n";
+    const char *fragment_text = "#version 120\nvoid main()\n{\ngl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);\n}\n";
+    unsigned vertex = create_shader(0x8b31), fragment = create_shader(0x8b30), program = create_program();
+    shader_source(vertex,1,&vertex_text,NULL); compile(vertex);
+    shader_source(fragment,1,&fragment_text,NULL); compile(fragment);
+    attach(program,vertex); attach(program,fragment);
+    bind_attribute(program,0,"v0");
+    link(program);
+    int linked = 0;
+    program_status(program,0x8b82,&linked);
+    // The gl4es patch (realize_glenv) reads this kept text to decide which
+    // programs a clip plane applies to.
+    char kept[4096] = {0};
+    kept_source(vertex,sizeof(kept),NULL,kept);
+    fprintf(stderr,"[P2-GL-PROBE] gl4es keeps the vertex source with gl_ClipVertex=%d gl4es_ClipVertex=%d linked=%d\n",
+        strstr(kept,"gl_ClipVertex") != NULL,strstr(kept,"gl4es_ClipVertex") != NULL,linked);
+    const float quad[] = {-1,-1, 1,-1, -1,1, 1,1};
+    unsigned buffer = 0;
+    gen_buffers(1,&buffer); bind_buffer(0x8892,buffer);
+    buffer_data(0x8892,sizeof(quad),quad,0x88e4);
+    use(program);
+    attribute(0,2,0x1406,0,0,NULL); enable_attribute(0);
+    int width = 0, height = 0;
+    p2_vision_gl_drawable_size(&width,&height);
+    viewport(0,0,width,height);
+    // GL keeps dot(plane, gl_ClipVertex) >= 0: x >= -0.5 one way, x <= 0.5 the other.
+    static const struct { const char *view; double plane[4]; int lit[4]; } cases[] = {
+        {"no clip plane",{0,0,0,0},{1,1,1,1}},
+        {"blue to orange",{1,0,0,0.5},{0,1,1,1}},
+        {"orange to blue",{-1,0,0,0.5},{1,1,1,0}},
+        {"clip plane disabled again",{0,0,0,0},{1,1,1,1}},
+    };
+    int valid = linked != 0;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int clipped = cases[i].plane[0] != 0, lit[4] = {-1,-1,-1,-1};
+        if (clipped) { clip_plane(0x3000,cases[i].plane); enable(0x3000); }
+        clear_color(0,0,0,1); clear(0x4000);
+        draw(0x0005,0,4);
+        if (clipped) disable(0x3000);
+        rt_ios_gl_swap_window(window);
+        int matches = lit_columns(lit) && !memcmp(lit,cases[i].lit,sizeof(lit));
+        fprintf(stderr,"[P2-GL-PROBE] %s: lit at x=-0.75,-0.25,0.25,0.75 is %d,%d,%d,%d, expected %d,%d,%d,%d\n",
+            cases[i].view,lit[0],lit[1],lit[2],lit[3],
+            cases[i].lit[0],cases[i].lit[1],cases[i].lit[2],cases[i].lit[3]);
+        valid = valid && matches;
+    }
+    disable_attribute(0); use(0); bind_buffer(0x8892,0);
+    delete_buffers(1,&buffer); delete_program(program); delete_shader(vertex); delete_shader(fragment);
+    fprintf(stderr,"[P2-GL-PROBE] %s: a gl_ClipVertex clip plane hides only its own far side, for both directions of a portal link\n",valid ? "PASS" : "FAIL");
+    return valid;
+}
+
 int main(void) {
     @autoreleasepool {
         setenv("SDL_VIDEODRIVER", "dummy", 1);
@@ -265,6 +377,7 @@ int main(void) {
             IOSurfaceUnlock(left,kIOSurfaceLockReadOnly,NULL); IOSurfaceUnlock(right,kIOSurfaceLockReadOnly,NULL);
             p2_vision_gl_release(pair.slot);
         } else valid = 0;
+        valid = clip_plane_sides(window) && valid;
         clear_color(0.75f,0.25f,0.5f,1); clear(0x4000);
         rt_ios_gl_swap_window(window);
         valid = check_frame(160,120,resized) && valid;

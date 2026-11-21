@@ -8,8 +8,8 @@
 // is touched: the start/direction vectors that caller passed are rewritten to
 // the right controller's aim ray and the translated function then traces it.
 // The caller's later uses of the same vectors (the PortalBlast effect angles)
-// follow along. Grab and use keep following the head (seated head aim sets the
-// engine view angles; view_vision.c).
+// follow along. Seated head aim still sets the engine view angles used for
+// tracing stock interactions such as pickup and pressing switches.
 //
 // Viewmodel: C_BaseViewModel/C_PredictedViewModel CalcViewModelView (vtable
 // slot 288, audited by tools/visionos_hooks.py) runs unchanged, then the model
@@ -48,6 +48,7 @@ int rt_ios_game_ui_visible_shared(void); // runtime/ios/game_state.c, any thread
 
 static pthread_mutex_t basis_lock = PTHREAD_MUTEX_INITIALIZER;
 static P2XRAimBasis basis;
+static matrix_float4x4 carry_mapping;
 static pthread_once_t settings_once = PTHREAD_ONCE_INIT;
 static int controller_aim, viewmodel_enabled;
 // Stock v_portalgun ACT_VM_IDLE: the right wrist is at (7.29438, -8.18264,
@@ -88,18 +89,50 @@ static void read_settings(void) {
 }
 static void settings(void) { pthread_once(&settings_once, read_settings); }
 
-void p2_vision_aim_publish(uint64_t session, uint64_t sequence, const P2XRBody *body, vector_float3 head_angles) {
-    P2XRAimBasis next;
-    int valid = p2_xr_aim_basis(&next, session, sequence, monotonic(), body, head_angles);
+void p2_vision_aim_publish(uint64_t session, uint64_t sequence, const P2XRBody *camera,
+                           const P2XRBody *body, vector_float3 head_angles) {
+    P2XRAimBasis next = {0};
+    p2_xr_aim_basis(&next, session, sequence, monotonic(), camera, head_angles);
     pthread_mutex_lock(&basis_lock);
-    if (valid) basis = next;
-    else memset(&basis, 0, sizeof(basis));
+    basis = next;
+    carry_mapping = body->source_from_tracking;
     pthread_mutex_unlock(&basis_lock);
 }
 void p2_vision_aim_clear(void) {
     pthread_mutex_lock(&basis_lock);
     memset(&basis, 0, sizeof(basis));
     pthread_mutex_unlock(&basis_lock);
+}
+
+int p2_vision_carry_grip(uint64_t session, const P2XRFrame *frame, const P2XRInput *input,
+                       unsigned hand, vector_float3 stock_origin, vector_float3 *target,
+                       matrix_float3x3 *orientation) {
+    if (!session || !input->spatial || !input->connected || hand >= 2 ||
+        !frame->tracked || !frame->controllers[hand].tracked || rt_ios_game_ui_visible_shared()) return 0;
+    pthread_mutex_lock(&basis_lock);
+    P2XRAimBasis current = basis;
+    matrix_float4x4 source_from_tracking = carry_mapping;
+    pthread_mutex_unlock(&basis_lock);
+    double now = monotonic();
+    if (current.session != session || frame->sequence < current.sequence ||
+        frame->sequence - current.sequence > P2_XR_AIM_MAX_FRAMES ||
+        now < current.stamp || now - current.stamp > P2_XR_AIM_MAX_AGE) return 0;
+
+    // The latest gameplay tick can have moved the player since the last pose
+    // publication. Rebase only to a nearby stock player origin.
+    if (!(simd_distance(stock_origin, current.eye) <= P2_XR_AIM_REACH)) return 0;
+    const P2XRControllerPose *pose = &frame->controllers[hand];
+    matrix_float4x4 grip = simd_mul(source_from_tracking, pose->tracking_from_grip);
+    vector_float3 position = grip.columns[3].xyz;
+    vector_float3 offset = position - current.eye;
+    vector_float3 forward = -simd_mul(source_from_tracking, pose->tracking_from_aim.columns[2]).xyz;
+    float length = simd_length(forward);
+    if (!(simd_length(offset) <= P2_XR_AIM_REACH) || !(length > 1e-6f) || !isfinite(length)) return 0;
+    const float grip_clearance_meters = 0.30f;
+    *target = stock_origin + offset + grip_clearance_meters * forward;
+    *orientation = (matrix_float3x3){{simd_normalize(-grip.columns[2].xyz),
+                                     simd_normalize(-grip.columns[0].xyz), simd_normalize(grip.columns[1].xyz)}};
+    return 1;
 }
 // Everything a controller shot or viewmodel needs: audited profile, Sense
 // pair owning input, current tracked session with the right controller

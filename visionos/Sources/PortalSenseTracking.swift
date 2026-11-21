@@ -214,7 +214,10 @@ final class PortalSenseTracking: PortalSpatialSource, @unchecked Sendable {
             default: continue
             }
             input.connected = 1
-            if pressed(.grip) { input.buttons |= UInt32(P2_XR_USE.rawValue) }
+            if pressed(.grip) {
+                let hand = accessory.inherentChirality == .left ? P2_XR_GRIP_LEFT : P2_XR_GRIP_RIGHT
+                input.buttons |= UInt32(P2_XR_USE.rawValue) | UInt32(hand.rawValue)
+            }
             if pressed(.menu, .options) { input.buttons |= UInt32(P2_XR_PAUSE.rawValue) }
         }
         if leftClick && rightClick { input.buttons |= UInt32(P2_XR_WINDOW.rawValue) }

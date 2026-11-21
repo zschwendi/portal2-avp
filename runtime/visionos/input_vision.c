@@ -21,6 +21,14 @@ static Sint16 trigger(float v) { return (Sint16)lrintf(fmaxf(0,fminf(1,v)) * 655
 void rt_ios_game_state_poll(void);
 int rt_ios_game_ui_visible(void);
 void rt_ios_console_command(const char *line);
+static P2XRGripUse grip_use;
+
+int p2_vision_take_grip_use(uint64_t session, unsigned *hand) {
+    P2XRInput input;
+    if (!session || p2_xr_read_latest(NULL, &input) != session || !input.connected || !input.spatial ||
+        !p2_vision_head_aim_active() || rt_ios_game_ui_visible()) return 0;
+    return p2_xr_take_grip_use(&grip_use, session, SDL_GetTicks64(), hand);
+}
 
 // Explicit simulator development audit, never enabled by the player UI.
 // Exercise the actual guest SDL pad path after loading a controllable map.
@@ -120,6 +128,9 @@ static void trace_pad(uint64_t controls, const P2XRInput *input, const Sint16 ax
 int p2_vision_input_init(void) {
     SDL_Joystick *live = pad_id < 0 ? NULL : SDL_JoystickFromInstanceID(pad_id);
     if (pad && live == pad && SDL_JoystickGetAttached(pad)) return 0;
+#if P2_VISION_GAME
+    grip_use = (P2XRGripUse){0};
+#endif
     if (pad) {
         fprintf(stderr,"[vision-input] Retiring detached native pad id=%d; SDL count=%d initialized=%#x\n",
             pad_id,SDL_NumJoysticks(),SDL_WasInit(0));
@@ -185,8 +196,9 @@ void p2_vision_input_poll(void) {
     static P2MenuInput menu;
     static int menu_dpad = -1;
     if (menu_dpad < 0) { const char *v = getenv("P2_VISION_MENU_DPAD"); menu_dpad = v && !strcmp(v,"1"); }
+    int ui_visible = rt_ios_game_ui_visible();
     uint32_t dpad = input.connected == P2_VISION_INPUT_HANDS ? 0 :
-        p2_menu_input_map(&menu,rt_ios_game_ui_visible(),menu_dpad,&input);
+        p2_menu_input_map(&menu,ui_visible,menu_dpad,&input);
 #else
     uint32_t dpad = 0;
 #endif
@@ -196,6 +208,7 @@ void p2_vision_input_poll(void) {
     // turning; windowed play keeps stick yaw/pitch.
 #if P2_VISION_GAME
     int immersive = p2_vision_head_aim_active();
+    uint64_t grip_session = immersive && !ui_visible && input.connected && input.spatial ? controls : 0;
 #else
     int immersive = 0;
 #endif
@@ -218,7 +231,15 @@ void p2_vision_input_poll(void) {
             button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? P2_MENU_DPAD_RIGHT : 0;
         int down = (input.buttons & action) != 0 || (dpad & direction) != 0;
         if (down) pressed |= 1u << button;
-        SDL_JoystickSetVirtualButton(pad,button,down);
+        int sent = SDL_JoystickSetVirtualButton(pad,button,down) == 0;
+#if P2_VISION_GAME
+        if (button == SDL_CONTROLLER_BUTTON_X) {
+            if (sent) p2_xr_note_grip_use(&grip_use, grip_session, input.buttons, SDL_GetTicks64());
+            else grip_use = (P2XRGripUse){0};
+        }
+#else
+        (void)sent;
+#endif
     }
     trace_pad(controls,&input,axes,pressed);
 }

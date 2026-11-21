@@ -72,7 +72,7 @@ index 498ecc5..8652abf 100644
                  type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
          else
 diff --git a/src/gl/fpe.c b/src/gl/fpe.c
-index c21bcf1..bb46381 100644
+index c21bcf1..8663c7b 100644
 --- a/src/gl/fpe.c
 +++ b/src/gl/fpe.c
 @@ -462,6 +462,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
@@ -173,13 +173,13 @@ index c21bcf1..bb46381 100644
 -            program = glprogram->id;
 -            DBG(printf("%d\n", program);)
 +        } else {
-+            // Plans de découpe : seul un nuanceur qui écrit gl_ClipVertex sait quoi découper. Les
-+            // autres (copies d'écran, celles de gl4es) ne doivent pas l'être, et leur variante
-+            // utiliserait gl_Vertex, dont l'emplacement 0 est déjà pris : l'édition échoue.
++            // Plans de découpe : seul un nuanceur qui écrit gl_ClipVertex (gl4es_ClipVertex une fois
++            // converti) sait quoi découper. Les autres (copies d'écran, celles de gl4es) ne doivent pas
++            // l'être : leur variante utiliserait gl_Vertex, emplacement 0 déjà pris, l'édition échoue.
 +            if(state.plane && glprogram->last_vert) {
 +                if(glprogram->clip_checked_src != glprogram->last_vert->source) {
 +                    glprogram->clip_checked_src = glprogram->last_vert->source;
-+                    glprogram->clipvertex = glprogram->last_vert->source && strstr(glprogram->last_vert->source, "gl4es_ClipVertex");
++                    glprogram->clipvertex = glprogram->last_vert->source && (strstr(glprogram->last_vert->source, "gl_ClipVertex") || strstr(glprogram->last_vert->source, "gl4es_ClipVertex"));
 +                }
 +                if(!glprogram->clipvertex) state.plane = 0;
 +            }
@@ -263,6 +263,28 @@ index 4c51179..9bdaf3c 100644
  } fpe_fpe_t;
  
  #ifndef kh_fpecachelist_t
+diff --git a/src/gl/fpe_shader.c b/src/gl/fpe_shader.c
+index dbe87a7..2210a13 100644
+--- a/src/gl/fpe_shader.c
++++ b/src/gl/fpe_shader.c
+@@ -1708,12 +1708,13 @@ if(default_fragment) printf("fpe_CustomVertexShader(%p, %p, %d)\n%s\ncolor=%d\n"
+         }
+         ShadAppend("_gl4es_main();\n");
+         if(planes) {
+-            int clipvertex = 0;
+-            if(strstr(shad, "gl4es_ClipVertex"))
+-                clipvertex = 1;
++            // The custom wrapper is added before desktop GLSL is converted.
++            // Preserve togl's clip-space output through that conversion.
++            const char* clipvertex = strstr(initial, "gl_ClipVertex") ? "gl_ClipVertex" :
++                strstr(initial, "gl4es_ClipVertex") ? "gl4es_ClipVertex" : "gl_ModelViewMatrix * gl_Vertex";
+             for (int i=0; i<hardext.maxplanes; i++) {
+                 if((planes>>i)&1) {
+-                    sprintf(buff, "clippedvertex_%d = dot(%s, _gl4es_ClipPlane_%d);\n", i, clipvertex?"gl4es_ClipVertex":"gl_ModelViewMatrix * gl_Vertex", i);
++                    sprintf(buff, "clippedvertex_%d = dot(%s, _gl4es_ClipPlane_%d);\n", i, clipvertex, i);
+                     ShadAppend(buff);
+                 }
+             }
 diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
 index b0f0299..3929400 100644
 --- a/src/gl/framebuffers.c

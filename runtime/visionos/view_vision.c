@@ -10,6 +10,7 @@
 #include "aim_vision.h"
 #include "game_vision.h"
 #include "gl_vision.h"
+#include "pickup_hud_vision.h"
 #include "reticle_trace.h"
 #include "../../build/visionos/xr-profile.h"
 #include "../../build/visionos/xr-reticle-profile.h"
@@ -287,7 +288,7 @@ static void aim_drive(CPU *c, const P2XRFrame *pose, P2XRBody *camera, uint64_t 
     aim_session = session;
     // Tracked controller aim (aim_vision.c) uses this body and checks every
     // engine shot against the angles just written.
-    p2_vision_aim_publish(session,pose->sequence,camera,head);
+    p2_vision_aim_publish(session,pose->sequence,camera,&body,head);
 }
 // Session over: leave the angles where the head last aimed, level roll and
 // in-range pitch, so windowed stick look continues without a snap.
@@ -649,6 +650,7 @@ void p2_vision_view_poll(void) {
     }
     if (!immersive || failed) crosshair.mode = P2_VISION_RETICLE_HEAD;
     set_crosshair_hooks(installed && !failed && immersive);
+    if (installed) p2_vision_pickup_hud_set_active(rt_foreign_thread_attach(), !failed && immersive);
     aim_poll();
 }
 #endif

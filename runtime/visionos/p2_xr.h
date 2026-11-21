@@ -14,7 +14,9 @@ extern "C" {
 enum P2XRButtons {
     P2_XR_JUMP = 1u << 0, P2_XR_CROUCH = 1u << 1,
     P2_XR_USE = 1u << 2, P2_XR_PAUSE = 1u << 3,
-    P2_XR_RECENTER = 1u << 4, P2_XR_WINDOW = 1u << 5
+    P2_XR_RECENTER = 1u << 4, P2_XR_WINDOW = 1u << 5,
+    // Source of an accompanying Use press. These do not map to SDL buttons.
+    P2_XR_GRIP_LEFT = 1u << 6, P2_XR_GRIP_RIGHT = 1u << 7
 };
 
 typedef struct {
@@ -164,6 +166,20 @@ typedef struct {
 #define P2_XR_117_STALL_LIMIT 0.5
 float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float turn_x, float look_y,
                            float degrees_per_second, double timestamp);
+
+// On the guest game thread, remember which Sense grip produced the actual
+// SDL X rising edge. Session 0 means the route is ineligible for carry.
+#define P2_XR_GRIP_USE_MAX_AGE_MS 250u
+typedef struct {
+    uint64_t session, pressed_ms;
+    uint32_t grips;
+    int down;
+} P2XRGripUse;
+void p2_xr_note_grip_use(P2XRGripUse *state, uint64_t session, uint32_t buttons, uint64_t now_ms);
+// A successful pickup can consume a matching fresh edge once. Returns 1
+// and writes controller index (left 0, right 1), or 0 with *hand untouched.
+int p2_xr_take_grip_use(P2XRGripUse *state, uint64_t session, uint64_t now_ms, unsigned *hand);
+
 // Numeric setting text (environment). *value is always usable: 0 unset,
 // 1 parsed, -1 rejected (fallback kept).
 int p2_xr_setting(const char *text, float fallback, float low, float high, float *value);
@@ -208,6 +224,10 @@ int p2_xr_aim_fresh(const P2XRAimBasis *basis, uint64_t session, const P2XRFrame
 // Right controller aim ray: origin relative to the basis eye, unit direction.
 int p2_xr_aim_controller(const P2XRAimBasis *basis, const P2XRFrame *latest,
                          vector_float3 *offset, vector_float3 *direction);
+// Source angles use X forward, Y left, Z up. Convert a held entity's initial
+// orientation to grip space and back as the hand rotates.
+matrix_float3x3 p2_xr_angle_matrix(vector_float3 angles);
+vector_float3 p2_xr_matrix_angles(matrix_float3x3 matrix);
 // Engine trace start moved by the controller offset, clamped into the hull
 // box: 1 moved, 2 too far (engine start kept), 0 invalid input.
 int p2_xr_aim_start(vector_float3 engine_start, vector_float3 offset, vector_float3 *start);

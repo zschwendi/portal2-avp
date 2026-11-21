@@ -206,12 +206,15 @@ int p2_xr_publish_input(uint64_t session, const P2XRInput *input) {
             latest_input.look_y = axis(input->look_y, -1);
             latest_input.blue_trigger = axis(input->blue_trigger, 0);
             latest_input.orange_trigger = axis(input->orange_trigger, 0);
-            latest_input.buttons &= P2_XR_JUMP | P2_XR_CROUCH | P2_XR_USE | P2_XR_PAUSE | P2_XR_RECENTER | P2_XR_WINDOW;
+            latest_input.buttons &= P2_XR_JUMP | P2_XR_CROUCH | P2_XR_USE | P2_XR_PAUSE | P2_XR_RECENTER | P2_XR_WINDOW |
+                P2_XR_GRIP_LEFT | P2_XR_GRIP_RIGHT;
         }
         // A held mask survives a rejected sample (no head frame yet, NaN);
         // another device, a disconnect or the window forgets it.
         if (window_session || !input->spatial || !input->connected) forget_held();
         else if (latest_input.spatial) mask_held();
+        if (window_session || !latest_input.spatial || !(latest_input.buttons & P2_XR_USE))
+            latest_input.buttons &= ~(P2_XR_GRIP_LEFT | P2_XR_GRIP_RIGHT);
         // The device, not this sample's fate: a sample rejected while the
         // head is lost says nothing about who holds the controls.
         uint32_t connected = input->connected, spatial = input->spatial != 0;
@@ -489,6 +492,29 @@ float p2_xr_117_smooth_turn(P2XRSmoothTurn *state, float x, float y, float rate,
     state->velocity += (target - state->velocity) * blend;
     return (float)turn;
 }
+void p2_xr_note_grip_use(P2XRGripUse *state, uint64_t session, uint32_t buttons, uint64_t now_ms) {
+    int down = (buttons & P2_XR_USE) != 0;
+    if (!session || state->session != session) {
+        // An already-held button belongs to the old route or menu. A fresh
+        // edge only exists after this route has seen the button released.
+        *state = (P2XRGripUse){.session = session, .down = down};
+        return;
+    }
+    if (down && !state->down) {
+        state->grips = buttons & (P2_XR_GRIP_LEFT | P2_XR_GRIP_RIGHT);
+        if (!state->grips) state->grips = P2_XR_GRIP_RIGHT; // Sense face button uses the weapon hand.
+        state->pressed_ms = now_ms;
+    }
+    state->down = down;
+}
+int p2_xr_take_grip_use(P2XRGripUse *state, uint64_t session, uint64_t now_ms, unsigned *hand) {
+    if (!hand || !session || state->session != session || !state->grips) return 0;
+    uint32_t grips = state->grips;
+    state->grips = 0;
+    if (now_ms < state->pressed_ms || now_ms - state->pressed_ms > P2_XR_GRIP_USE_MAX_AGE_MS) return 0;
+    *hand = (grips & P2_XR_GRIP_LEFT) ? 0 : 1; // Prefer left if both grips made the edge.
+    return 1;
+}
 int p2_xr_setting(const char *text, float fallback, float low, float high, float *value) {
     if (value) *value = fallback;
     if (!text || !*text) return 0;
@@ -503,6 +529,22 @@ int p2_xr_setting(const char *text, float fallback, float low, float high, float
 static vector_float3 angle_forward(vector_float3 angles) {
     float pitch = angles.x * (float)M_PI / 180, yaw = angles.y * (float)M_PI / 180;
     return (vector_float3){cosf(pitch) * cosf(yaw), cosf(pitch) * sinf(yaw), -sinf(pitch)};
+}
+matrix_float3x3 p2_xr_angle_matrix(vector_float3 angles) {
+    vector_float3 radians = angles * ((float)M_PI / 180);
+    float sp = sinf(radians.x), cp = cosf(radians.x), sy = sinf(radians.y), cy = cosf(radians.y);
+    float sr = sinf(radians.z), cr = cosf(radians.z);
+    vector_float3 forward = {cp * cy, cp * sy, -sp};
+    vector_float3 left = {sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, sr * cp};
+    return (matrix_float3x3){{forward, left, simd_cross(forward, left)}};
+}
+vector_float3 p2_xr_matrix_angles(matrix_float3x3 matrix) {
+    vector_float3 forward = matrix.columns[0], left = matrix.columns[1], up = matrix.columns[2];
+    float horizontal = hypotf(forward.x, forward.y);
+    float pitch = atan2f(-forward.z, horizontal);
+    float yaw = horizontal > 0.001f ? atan2f(forward.y, forward.x) : atan2f(-left.x, left.y);
+    float roll = horizontal > 0.001f ? atan2f(left.z, up.z) : 0;
+    return (vector_float3){pitch, yaw, roll} * (180 / (float)M_PI);
 }
 static int invertible(matrix_float4x4 m) {
     return finite_matrix(m) && fabsf(simd_determinant(m)) > 1e-8f;
