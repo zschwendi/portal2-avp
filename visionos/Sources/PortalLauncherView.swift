@@ -414,6 +414,7 @@ struct PortalSettingsSheet: View {
     let close: () -> Void
     @AppStorage("P2VisionHighFrameRate") private var highFrameRate = false
     @State private var cameraHeight = Int(p2_vision_game_eye_height_cm())
+    @State private var seatedCamera = p2_vision_game_seated_camera(nil) != 0
 
     var body: some View {
         NavigationStack {
@@ -456,25 +457,34 @@ struct PortalSettingsSheet: View {
                 }
                 .listRowBackground(PortalStyle.surface)
                 Section("Immersive view") {
-                    Stepper(value: Binding(get: { cameraHeight }, set: { setCameraHeight($0) }),
-                            in: Int(P2_VISION_EYE_HEIGHT_MIN_CM)...Int(P2_VISION_EYE_HEIGHT_MAX_CM), step: 5) {
-                        HStack {
-                            Text("Camera Height")
-                            Spacer()
-                            Text("\(cameraHeight) cm")
-                                .monospacedDigit()
-                                .foregroundStyle(PortalStyle.textSecondary)
+                    Toggle("Seated Camera Controls", isOn: Binding(get: { seatedCamera }, set: { setSeatedCamera($0) }))
+                    if seatedCamera {
+                        Stepper(value: Binding(get: { cameraHeight }, set: { setCameraHeight($0) }),
+                                in: Int(P2_VISION_EYE_HEIGHT_MIN_CM)...Int(P2_VISION_EYE_HEIGHT_MAX_CM), step: 5) {
+                            HStack {
+                                Text("Camera Height")
+                                Spacer()
+                                Text("\(cameraHeight) cm")
+                                    .monospacedDigit()
+                                    .foregroundStyle(PortalStyle.textSecondary)
+                            }
                         }
-                    }
-                    .accessibilityLabel("Camera Height")
-                    .accessibilityValue(Text("\(cameraHeight) centimeters"))
-                    if cameraHeight != 0 {
-                        Button("Reset Camera Height") { setCameraHeight(0) }
+                        .accessibilityLabel("Camera Height")
+                        .accessibilityValue(Text("\(cameraHeight) centimeters"))
+                        if cameraHeight != 0 {
+                            Button("Reset Camera Height") { setCameraHeight(0) }
+                        }
+                    } else {
+                        Text("Look up and down with your head at the normal camera height. Your saved height adjustment comes back when you turn this on.")
+                            .font(.footnote)
+                            .foregroundStyle(PortalStyle.textSecondary)
                     }
                     Text("Use the expand arrows on the game window to play around you. Pause, or hold both stick buttons, to come back to the window.")
-                    Text("Push the right stick up or down to tilt the camera slowly, up to 45\u{00B0} either way, so you can look down without bending your neck. Press the left stick to recenter: you face forward again and the tilt levels.")
-                    Text("Camera Height moves only your view. The game still uses the normal player height for collisions and shots.")
-                        .foregroundStyle(PortalStyle.textSecondary)
+                    if seatedCamera {
+                        Text("Push the right stick up or down to tilt the camera slowly, up to 45\u{00B0} either way, so you can look down without bending your neck. Press the left stick to recenter: you face forward again and the tilt levels.")
+                        Text("Camera Height moves only your view. The game still uses the normal player height for collisions and shots.")
+                            .foregroundStyle(PortalStyle.textSecondary)
+                    }
                     Text("Without a controller, hand gestures work in immersive view.")
                         .foregroundStyle(PortalStyle.textSecondary)
                 }
@@ -517,6 +527,11 @@ struct PortalSettingsSheet: View {
     private func setCameraHeight(_ centimeters: Int) {
         p2_vision_game_set_eye_height_cm(Int32(centimeters))
         cameraHeight = Int(p2_vision_game_eye_height_cm())
+    }
+
+    private func setSeatedCamera(_ on: Bool) {
+        p2_vision_game_set_seated_camera(on ? 1 : 0)
+        seatedCamera = p2_vision_game_seated_camera(nil) != 0
     }
 
     private func row(_ title: String, _ value: String) -> some View {

@@ -26,6 +26,13 @@ enum {
 };
 int p2_vision_game_eye_height_cm(void);
 void p2_vision_game_set_eye_height_cm(int centimeters);
+// Seated Camera Controls: the right-stick tilt and Camera Height in immersive
+// view. On by default, also for installs from before the setting. Off, pitch
+// follows the head at the stock height; the saved height is kept. Any thread;
+// the launcher sets and saves it on the UI thread. *changes (optional) counts
+// those sets, so the engine also notices an off and on it never rendered.
+int p2_vision_game_seated_camera(unsigned *changes);
+void p2_vision_game_set_seated_camera(int on);
 // Runs the completeness check without starting the engine (also writes the
 // status file, and remembers the report). Returns report->complete. Any thread.
 int p2_vision_content_check(const char *trigger, P2ContentReport *report);

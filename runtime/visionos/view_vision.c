@@ -186,10 +186,28 @@ static void watch_recenter(uint64_t session, uint32_t buttons, int usable) {
     else if (pressed) recenter_session = session;
 }
 
+// Launcher Seated Camera Controls, read on every poll and render. Any change,
+// even an off and on between two reads, levels the tilt; a stick held across
+// it must center before it tilts again (p2_xr_117_smooth_turn re-arms there).
+static unsigned seated_changes;
+static int seated_controls(void) {
+    unsigned changes;
+    int on = p2_vision_game_seated_camera(&changes);
+    if (changes != seated_changes) {
+        fprintf(stderr,"[vision-aim] Seated Camera Controls %s (virtual pitch %.2f -> 0)\n",on ? "on" : "off",stick_pitch);
+        seated_changes = changes;
+        stick_pitch = 0;
+        smooth_pitch = (P2XRSmoothTurn){0};
+    }
+    return on;
+}
+
 static int seated_camera(const P2XRFrame *pose, P2XRBody *camera) {
+    // Off: head-tracked pitch at the stock eye height; the saved height stays.
     // p2_xr_body_camera clamps the final Source height for any scale.
-    float height = p2_vision_game_eye_height_cm() * 0.01f * units_per_meter;
-    return p2_xr_body_camera(&body, pose, stick_pitch, height, camera);
+    int seated = seated_controls();
+    float height = seated ? p2_vision_game_eye_height_cm() * 0.01f * units_per_meter : 0;
+    return p2_xr_body_camera(&body, pose, seated ? stick_pitch : 0, height, camera);
 }
 
 static void aim_refuse(const char *reason) {
@@ -341,7 +359,8 @@ static void aim_poll(void) {
         // response and ramp at half the horizontal turn speed, within 117's
         // ±45 degree tilt; physical head pitch adds on top (final ±89). Source
         // pitch increases downward, so the same signed response makes up look up.
-        if (smooth_rate > 0) {
+        // Without Seated Camera Controls the head alone pitches.
+        if (smooth_rate > 0 && seated_controls()) {
             const float limit = 45.0f;
             float pitch_delta = p2_xr_117_smooth_turn(&smooth_pitch,controls.look_y,controls.turn_x,
                 fminf(smooth_rate * 0.5f,120),pose.presentation_time);

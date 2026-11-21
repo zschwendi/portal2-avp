@@ -73,6 +73,33 @@ void p2_vision_game_set_eye_height_cm(int centimeters) {
     atomic_store_explicit(&eye_height_cm, centimeters, memory_order_relaxed);
 }
 
+static NSString *const seated_camera_key = @"P2VisionSeatedCameraControls";
+// Bit 0 is the setting; the bits above count the launcher's changes.
+static _Atomic unsigned seated_camera;
+
+static void load_seated_camera(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        BOOL on = [defaults objectForKey:seated_camera_key] ? [defaults boolForKey:seated_camera_key] : YES;
+        atomic_store(&seated_camera, on ? 1u : 0u);
+    });
+}
+
+int p2_vision_game_seated_camera(unsigned *changes) {
+    load_seated_camera();
+    unsigned value = atomic_load(&seated_camera);
+    if (changes) *changes = value >> 1;
+    return (int)(value & 1);
+}
+
+void p2_vision_game_set_seated_camera(int on) {
+    load_seated_camera();
+    [NSUserDefaults.standardUserDefaults setBool:on != 0 forKey:seated_camera_key];
+    unsigned value = atomic_load(&seated_camera);
+    while (!atomic_compare_exchange_weak(&seated_camera, &value, ((value + 2) & ~1u) | (on ? 1u : 0u))) {}
+}
+
 // Immersive eye size request: width << 32 | height, 0 for the windowed size.
 static _Atomic uint64_t eye_request;
 static _Atomic int eye_mode;
@@ -196,6 +223,7 @@ int p2_vision_game_start(const char *trigger, int intent) {
     if (!atomic_compare_exchange_strong(&state, &expected, 1)) return 0;
     atomic_store(&started_fps_limit, fps_limit);
     load_eye_height();
+    load_seated_camera();
     content_status(documents, &report, trigger, 1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         @autoreleasepool {
